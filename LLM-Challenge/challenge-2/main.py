@@ -1,7 +1,9 @@
-def caclulate():
+def calculate():
     from langchain_core.tools import tool
     from langchain.chat_models import init_chat_model
+    from langchain_core.messages import HumanMessage, ToolMessage, BaseMessage
     from pydantic import BaseModel, Field
+    from typing import List
     
     llm = init_chat_model(model="gpt-4o", model_provider="openai")
 
@@ -32,33 +34,45 @@ def caclulate():
     tools = [Addition, Multiply]
     llm_with_tools = llm.bind_tools(tools)
 
-    from langchain_core.messages import HumanMessage
-
-    question = "What is 2 + 3? Also what is 5 * 6?"
-    messages = [HumanMessage(question)]
+    question = "What is 2 + 8? Also what is 5 * 16?"
+    messages: List[BaseMessage] = [HumanMessage(question)]
 
     ai_msg = llm_with_tools.invoke(messages)
+    messages.append(ai_msg)
 
-    # tool_calls 调用工具，返回参数描述符号
-    print(ai_msg)
-
-    # If you want to inspect the AI message for tool calls, print its dict or content
-    # For example:
-    # print(ai_msg.__dict__)
-
-    # If the AI message contains tool calls in a different attribute, update accordingly.
-    # Example (uncomment and adjust if needed):
-    # for tool_call in ai_msg.some_tool_calls_attribute:
-    #     selected_tool = {"Addition": Addition, "Multiply": Multiply}[tool_call["name"]]
-    #     tool_msg = selected_tool.invoke(tool_call)
-    #     messages.append(tool_msg)
+    # 处理工具调用
+    tool_calls = getattr(ai_msg, 'tool_calls', None)
+    if tool_calls:
+        tool_map = {"Addition": Addition, "Multiply": Multiply}
         
+        for tool_call in tool_calls:
+            selected_tool = tool_map[tool_call["name"]]
+            tool_output = selected_tool.invoke(tool_call["args"])
+            tool_msg = ToolMessage(
+                content=str(tool_output),
+                tool_call_id=tool_call["id"]
+            )
+            messages.append(tool_msg)
+
+    # 获取最终回答
+    final_response = llm_with_tools.invoke(messages)
+    
+    print(f"问题: {question}")
+    print(f"AI的回答: {str(final_response.content)}")
+    
+    # 如果需要结构化结果，可以使用Result类
     class Result(BaseModel):
         question: str = Field(..., description="Question asked by the user")
-        result: int = Field(..., description="Result of the calculation")
-
+        answer: str = Field(..., description="Final answer from the AI")
     
-    print(messages)
+    result = Result(
+        question=question,
+        answer=str(final_response.content)
+    )
+    
+    print("\n结构化结果:")
+    print(f"问题: {result.question}")
+    print(f"答案: {result.answer}")
 
 if __name__ == '__main__':
-    caclulate()
+    calculate()
