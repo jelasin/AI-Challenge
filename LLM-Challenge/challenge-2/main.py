@@ -34,7 +34,7 @@ def calculate():
     tools = [Addition, Multiply]
     llm_with_tools = llm.bind_tools(tools)
 
-    question = "What is 2 + 8? Also what is 5 * 16?"
+    question = "What is 21356 + 99487? Also what is 12347 * 12958?"
     messages: List[BaseMessage] = [HumanMessage(question)]
 
     ai_msg = llm_with_tools.invoke(messages)
@@ -56,10 +56,6 @@ def calculate():
 
     # 获取最终回答
     final_response = llm_with_tools.invoke(messages)
-    
-    print(f"问题: {question}")
-    print(f"AI的回答: {str(final_response.content)}")
-    
     # 如果需要结构化结果，可以使用Result类
     class Result(BaseModel):
         question: str = Field(..., description="Question asked by the user")
@@ -70,7 +66,6 @@ def calculate():
         answer=str(final_response.content)
     )
     
-    print("\n结构化结果:")
     print(f"问题: {result.question}")
     print(f"答案: {result.answer}")
 
