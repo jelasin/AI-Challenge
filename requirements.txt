@@ -1,0 +1,13 @@
+langchain
+langchain-core
+langchain-community
+langgraph
+langsmith
+langserve
+langchain-openai
+langchain-tavily
+langchain-text-splitters
+langchain-experimental
+langchain-huggingface
+langchain-mcp-adapters
+pydantic
