@@ -9,5 +9,9 @@ langchain-tavily
 langchain-text-splitters
 langchain-experimental
 langchain-huggingface
+mcp
+mcp[cli]
+fastmcp
 langchain-mcp-adapters
+faiss-cpu
 pydantic
