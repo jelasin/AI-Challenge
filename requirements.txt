@@ -15,3 +15,5 @@ fastmcp
 langchain-mcp-adapters
 faiss-cpu
 pydantic
+langgraph[all]
+aiosqlite

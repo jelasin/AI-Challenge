@@ -232,7 +232,7 @@ def data_preprocessing_node(state: AnalysisState) -> dict:
     results = []
     
     for i, data_type in enumerate(data_types):
-        task_state = {
+        task_state: TaskState = {
             "task_id": f"preprocess_{data_type}",
             "input_data": SAMPLE_DATA.get(data_type, ""),
             "result": "",
@@ -381,7 +381,7 @@ def run_data_analysis_demo():
         analyzer = create_analysis_workflow()
         
         # 初始状态
-        initial_state = {
+        initial_state: AnalysisState = {
             "messages": [HumanMessage(content="开始数据分析")],
             "raw_data": selected_data,
             "data_summary": "",
@@ -437,7 +437,7 @@ def demo_subgraph():
     
     preprocessor = create_preprocessing_subgraph()
     
-    test_task = {
+    test_task: TaskState = {
         "task_id": "demo_task",
         "input_data": "示例数据: 销售记录, 用户行为, 市场数据",
         "result": "",

@@ -18,7 +18,7 @@ import os
 import json
 import time
 from datetime import datetime, timedelta
-from typing import TypedDict, Annotated, Literal, Dict, Any
+from typing import TypedDict, Annotated, Literal, Dict, Any, cast
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from langgraph.checkpoint.memory import MemorySaver
@@ -127,7 +127,9 @@ def request_analysis_node(state: ApprovalState) -> dict:
     
     try:
         response = llm.invoke([{"role": "user", "content": analysis_prompt}])
-        analysis = json.loads(response.content)
+        # 确保content是字符串类型
+        content = response.content if isinstance(response.content, str) else str(response.content)
+        analysis = json.loads(content)
         
         print(f"   风险等级: {analysis.get('risk_level', 'unknown')}")
         print(f"   建议: {analysis.get('recommendation', 'unknown')}")
@@ -370,7 +372,9 @@ def document_review_node(state: DocumentState) -> dict:
     
     try:
         response = llm.invoke([{"role": "user", "content": review_prompt}])
-        review_result = json.loads(response.content)
+        # 确保content是字符串类型
+        content = response.content if isinstance(response.content, str) else str(response.content)
+        review_result = json.loads(content)
         
         quality_score = review_result.get("quality_score", 0)
         issues = review_result.get("issues", [])
@@ -471,7 +475,7 @@ def demo_approval_workflow():
     approval_flow = create_approval_workflow()
     
     # 初始状态
-    initial_state = {
+    initial_state: ApprovalState = {
         "messages": [HumanMessage(content=f"提交{request_type}请求")],
         "request_type": request_type,
         "request_details": details,
@@ -493,7 +497,8 @@ def demo_approval_workflow():
     
     try:
         # 第一次执行 - 分析请求
-        result = approval_flow.invoke(initial_state, config)
+        config_typed = cast(Any, config)
+        result = approval_flow.invoke(initial_state, config_typed)
         
         print("\n📊 审批分析结果:")
         print(f"审批链: {' → '.join(result.get('approval_chain', []))}")
@@ -515,9 +520,10 @@ def demo_approval_workflow():
             approval_message = HumanMessage(content=approval_input)
             
             # 更新状态并继续
+            approval_state = cast(ApprovalState, {"messages": [approval_message]})
             result = approval_flow.invoke(
-                {"messages": [approval_message]},
-                config
+                approval_state,
+                config_typed
             )
             
             print(f"✅ {current_approver} 已审批")
@@ -567,7 +573,7 @@ def demo_document_review():
     # 创建文档审核工作流
     doc_workflow = create_document_workflow()
     
-    initial_state = {
+    initial_state: DocumentState = {
         "messages": [HumanMessage(content="开始文档审核")],
         "document_type": document_type,
         "content": content,
@@ -579,9 +585,10 @@ def demo_document_review():
     }
     
     config = {"configurable": {"thread_id": f"doc_review_{int(time.time())}"}}
+    config_typed = cast(Any, config)
     
     print("\n🔍 开始自动审核...")
-    result = doc_workflow.invoke(initial_state, config)
+    result = doc_workflow.invoke(initial_state, config_typed)
     
     print("\n📊 审核结果:")
     print(f"质量分数: {result.get('quality_score', 0)}/100")

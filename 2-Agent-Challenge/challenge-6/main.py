@@ -19,7 +19,7 @@ import json
 import time
 import asyncio
 from datetime import datetime, timedelta
-from typing import TypedDict, Annotated, List, Dict, Any, Optional
+from typing import TypedDict, Annotated, List, Dict, Any, Optional, cast
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from langgraph.checkpoint.memory import MemorySaver
@@ -532,7 +532,7 @@ def demo_multi_agent_collaboration():
     team_system = create_multi_agent_system()
     
     # 初始状态
-    initial_state = {
+    initial_state: TeamState = {
         "messages": [HumanMessage(content=f"启动项目: {topic}")],
         "project_brief": project_brief,
         "task_assignments": {
@@ -562,7 +562,8 @@ def demo_multi_agent_collaboration():
         
         # 执行多Agent协作
         print("\n🔄 开始团队协作...")
-        result = team_system.invoke(initial_state, config)
+        config_typed = cast(Any, config)
+        result = team_system.invoke(initial_state, config_typed)
         
         execution_time = time.time() - start_time
         

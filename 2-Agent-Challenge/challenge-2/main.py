@@ -18,11 +18,11 @@ import os
 import json
 import requests
 from datetime import datetime
-from typing import TypedDict, Annotated, Literal
+from typing import TypedDict, Annotated, Literal, cast
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
+from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, BaseMessage
 from langchain_core.tools import tool
 
 # 检查环境变量
@@ -182,12 +182,13 @@ def tool_calling_node(state: AgentState) -> dict:
     
     tool_calls_count = state.get("tool_calls_count", 0) + 1
     
-    # 如果LLM决定调用工具
-    if response.tool_calls:
+    # 检查response是否有tool_calls属性（使用getattr安全访问）
+    tool_calls = getattr(response, 'tool_calls', None)
+    if tool_calls:
         tool_result = ""
         messages_to_add = [response]
         
-        for tool_call in response.tool_calls:
+        for tool_call in tool_calls:
             print(f"   调用工具: {tool_call['name']}")
             print(f"   参数: {tool_call['args']}")
             
@@ -357,8 +358,8 @@ def run_smart_assistant():
             continue
             
         try:
-            # 构建初始状态
-            initial_state = {
+            # 构建初始状态，确保符合AgentState类型
+            initial_state: AgentState = {
                 "messages": [HumanMessage(content=user_input)],
                 "user_intent": "",
                 "tool_calls_count": 0,

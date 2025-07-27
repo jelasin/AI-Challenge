@@ -19,11 +19,19 @@ import sqlite3
 import json
 import time
 from datetime import datetime
-from typing import TypedDict, Annotated, Optional
+from typing import TypedDict, Annotated, Optional, cast, Any
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from langgraph.checkpoint.memory import MemorySaver
-from langgraph.checkpoint.sqlite import SqliteSaver
+# 注意：如果SqliteSaver不可用，我们将使用替代方案
+try:
+    from langgraph.checkpoint.sqlite import SqliteSaver  # type: ignore
+    SQLITE_AVAILABLE = True
+except ImportError:
+    SQLITE_AVAILABLE = False
+    SqliteSaver = None  # type: ignore
+    print("⚠️  SqliteSaver 不可用，将使用 MemorySaver 替代")
+    
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, AIMessage
 
@@ -63,7 +71,11 @@ def create_memory_saver():
 
 def create_sqlite_saver(db_path: str = "checkpoints.db"):
     """创建SQLite检查点存储器"""
-    return SqliteSaver.from_conn_string(f"sqlite:///{db_path}")
+    if SQLITE_AVAILABLE and SqliteSaver is not None:
+        return SqliteSaver.from_conn_string(f"sqlite:///{db_path}")
+    else:
+        print("⚠️  使用 MemorySaver 替代 SqliteSaver")
+        return MemorySaver()
 
 # 4. 用户档案管理节点
 def profile_analysis_node(state: ConversationState) -> dict:
@@ -99,7 +111,9 @@ def profile_analysis_node(state: ConversationState) -> dict:
         
         # 尝试解析LLM返回的JSON
         try:
-            updated_profile = json.loads(response.content)
+            # 确保response.content是字符串类型
+            content = response.content if isinstance(response.content, str) else str(response.content)
+            updated_profile = json.loads(content)
         except json.JSONDecodeError:
             # 如果解析失败，保留原档案并添加基本信息
             updated_profile = current_profile.copy()
@@ -143,9 +157,11 @@ def conversation_node(state: ConversationState) -> dict:
     # 添加最近的对话历史
     for msg in state["messages"][-5:]:  # 最近5条消息
         if isinstance(msg, HumanMessage):
-            messages.append({"role": "user", "content": msg.content})
+            content = msg.content if isinstance(msg.content, str) else str(msg.content)
+            messages.append({"role": "user", "content": content})
         elif isinstance(msg, AIMessage):
-            messages.append({"role": "assistant", "content": msg.content})
+            content = msg.content if isinstance(msg.content, str) else str(msg.content)
+            messages.append({"role": "assistant", "content": content})
     
     try:
         response = llm.invoke(messages)
@@ -209,7 +225,9 @@ def memory_consolidation_node(state: ConversationState) -> dict:
     
     try:
         response = llm.invoke([{"role": "user", "content": consolidation_prompt}])
-        consolidation_result = json.loads(response.content)
+        # 确保content是字符串类型
+        content = response.content if isinstance(response.content, str) else str(response.content)
+        consolidation_result = json.loads(content)
         
         # 更新偏好
         current_preferences = state.get("preferences", {})
@@ -382,7 +400,8 @@ def demo_persistent_chat():
         elif user_input.lower() == 'save':
             # 显示当前检查点信息
             try:
-                checkpoint = memory_saver.get(config)
+                config_typed = cast(Any, config)
+                checkpoint = memory_saver.get(config_typed)
                 if checkpoint:
                     print("💾 当前检查点:")
                     state = checkpoint.get("channel_values", {})
@@ -402,15 +421,16 @@ def demo_persistent_chat():
         
         try:
             # 添加用户消息
-            current_state = {
+            current_state = cast(ConversationState, {
                 **initial_state,
                 "messages": [HumanMessage(content=user_input)]
-            }
+            })
             
             print("🔄 处理中...")
             
             # 执行对话流程
-            result = chat_system.invoke(current_state, config)
+            config_typed = cast(Any, config)
+            result = chat_system.invoke(current_state, config_typed)
             
             # 获取AI回复
             ai_messages = [msg for msg in result["messages"] if isinstance(msg, AIMessage)]
@@ -455,7 +475,7 @@ def demo_task_recovery():
     task_type = task_types.get(choice, "research")
     
     # 初始任务状态
-    initial_task = {
+    initial_task: TaskState = {
         "task_id": task_id,
         "task_type": task_type,
         "current_step": 1,
@@ -472,7 +492,8 @@ def demo_task_recovery():
     
     try:
         # 执行任务
-        result = task_system.invoke(initial_task, config)
+        config_typed = cast(Any, config)
+        result = task_system.invoke(initial_task, config_typed)
         
         print(f"\n✅ 任务完成!")
         print(f"状态: {result.get('status')}")
