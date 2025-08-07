@@ -17,3 +17,4 @@ faiss-cpu
 pydantic
 langgraph[all]
 aiosqlite
+fastapi

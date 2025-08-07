@@ -24,6 +24,11 @@ async def main():
     
     gateway_url = "http://localhost:8000"
     
+    # 确保 workspace 目录存在
+    workspace_dir = Path(__file__).parent.parent / "mcp_servers" / "workspace"
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+    print(f"📁 工作空间: {workspace_dir}")
+    
     # 检查服务器是否运行
     print("🔍 检查 MCP HTTP 服务器...")
     try:
@@ -40,6 +45,7 @@ async def main():
                 print("\n🎉 Challenge 7 演示完成!")
                 print(f"🌐 网关地址: {gateway_url}")
                 print(f"📚 API 文档: {gateway_url}/docs")
+                print(f"📁 生产文件位置: {workspace_dir}")
                 
             else:
                 await show_server_instructions()
@@ -52,6 +58,11 @@ async def main():
 async def show_server_instructions():
     """显示服务器启动说明"""
     mcp_servers_dir = Path(__file__).parent.parent / "mcp_servers"
+    workspace_dir = mcp_servers_dir / "workspace"
+    
+    # 确保 workspace 目录存在
+    workspace_dir.mkdir(exist_ok=True)
+    
     print("\n" + "="*60)
     print("📋 请先启动 MCP HTTP 服务器")
     print("="*60)
@@ -61,6 +72,8 @@ async def show_server_instructions():
     print()
     print("或使用快速启动脚本:")
     print("  python start_http_server.py")
+    print()
+    print(f"📁 生产文件将保存在: {workspace_dir}")
     print()
     print("服务器启动后，重新运行此演示:")
     print("  python main.py")

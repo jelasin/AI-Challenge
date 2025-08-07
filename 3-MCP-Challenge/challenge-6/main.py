@@ -64,9 +64,10 @@ class SQLiteMCPManager:
         # 统计信息
         self.stats = {
             "tools_loaded": 0,
-            "database_operations": 0,
+            "total_operations": 0,
             "successful_operations": 0,
             "failed_operations": 0,
+            "database_operations": 0,
             "resources_accessed": 0,
             "sql_queries": 0
         }
@@ -117,6 +118,7 @@ class SQLiteMCPManager:
             if list_users_tool:
                 result = await list_users_tool.ainvoke({"limit": 5})
                 print(result)
+                self.stats["total_operations"] += 1
                 self.stats["successful_operations"] += 1
             
             # 2. 创建新用户
@@ -128,6 +130,7 @@ class SQLiteMCPManager:
                     "email": f"db_admin_{datetime.now().strftime('%H%M%S')}@example.com"
                 })
                 print(result)
+                self.stats["total_operations"] += 1
                 self.stats["successful_operations"] += 1
             
             # 3. 根据ID获取用户详情
@@ -136,6 +139,7 @@ class SQLiteMCPManager:
             if get_user_tool:
                 result = await get_user_tool.ainvoke({"user_id": 1})
                 print(result)
+                self.stats["total_operations"] += 1
                 self.stats["successful_operations"] += 1
             
             # 4. 再次列出用户查看变化
@@ -143,12 +147,14 @@ class SQLiteMCPManager:
             if list_users_tool:
                 result = await list_users_tool.ainvoke({"limit": 10})
                 print(result)
+                self.stats["total_operations"] += 1
                 self.stats["successful_operations"] += 1
             
             self.stats["database_operations"] += 4
             
         except Exception as e:
             print(f"❌ 用户操作演示失败: {e}")
+            self.stats["total_operations"] += 1
             self.stats["failed_operations"] += 1
     
     async def demonstrate_task_operations(self):
@@ -168,6 +174,7 @@ class SQLiteMCPManager:
                     "user_id": 1
                 })
                 print(result)
+                self.stats["total_operations"] += 1
                 self.stats["successful_operations"] += 1
             
             # 2. 查看所有任务
@@ -176,6 +183,7 @@ class SQLiteMCPManager:
             if list_tasks_tool:
                 result = await list_tasks_tool.ainvoke({"limit": 10})
                 print(result)
+                self.stats["total_operations"] += 1
                 self.stats["successful_operations"] += 1
             
             # 3. 查看特定用户的任务
@@ -184,6 +192,7 @@ class SQLiteMCPManager:
             if get_user_tasks_tool:
                 result = await get_user_tasks_tool.ainvoke({"user_id": 1})
                 print(result)
+                self.stats["total_operations"] += 1
                 self.stats["successful_operations"] += 1
             
             # 4. 更新任务状态
@@ -195,6 +204,7 @@ class SQLiteMCPManager:
                     "status": "in_progress"
                 })
                 print(result)
+                self.stats["total_operations"] += 1
                 self.stats["successful_operations"] += 1
             
             # 5. 按状态筛选任务
@@ -205,12 +215,14 @@ class SQLiteMCPManager:
                     "limit": 5
                 })
                 print(result)
+                self.stats["total_operations"] += 1
                 self.stats["successful_operations"] += 1
             
             self.stats["database_operations"] += 5
             
         except Exception as e:
             print(f"❌ 任务操作演示失败: {e}")
+            self.stats["total_operations"] += 1
             self.stats["failed_operations"] += 1
     
     async def demonstrate_database_queries(self):
@@ -229,6 +241,7 @@ class SQLiteMCPManager:
                     "description": "统计用户任务分布"
                 })
                 print(result)
+                self.stats["total_operations"] += 1
                 self.stats["successful_operations"] += 1
                 self.stats["sql_queries"] += 1
             
@@ -240,6 +253,7 @@ class SQLiteMCPManager:
                     "description": "任务状态分布统计"
                 })
                 print(result)
+                self.stats["total_operations"] += 1
                 self.stats["successful_operations"] += 1
                 self.stats["sql_queries"] += 1
             
@@ -251,6 +265,7 @@ class SQLiteMCPManager:
                     "description": "最近活动记录"
                 })
                 print(result)
+                self.stats["total_operations"] += 1
                 self.stats["successful_operations"] += 1
                 self.stats["sql_queries"] += 1
             
@@ -261,12 +276,14 @@ class SQLiteMCPManager:
                 for table in ["users", "tasks", "operation_logs"]:
                     result = await count_tool.ainvoke({"table_name": table})
                     print(f"  {result}")
+                    self.stats["total_operations"] += 1
                     self.stats["successful_operations"] += 1
             
             self.stats["database_operations"] += 6
             
         except Exception as e:
             print(f"❌ 数据库查询演示失败: {e}")
+            self.stats["total_operations"] += 1
             self.stats["failed_operations"] += 1
     
     async def demonstrate_schema_operations(self):
@@ -292,12 +309,14 @@ class SQLiteMCPManager:
                     if len(key_lines) > 12:
                         print(f"  ... (显示了前12行，共{len(key_lines)}行)")
                     
+                    self.stats["total_operations"] += 1
                     self.stats["successful_operations"] += 1
             
             self.stats["database_operations"] += 3
             
         except Exception as e:
             print(f"❌ 数据库结构操作演示失败: {e}")
+            self.stats["total_operations"] += 1
             self.stats["failed_operations"] += 1
     
     async def demonstrate_database_resources(self):
@@ -371,10 +390,12 @@ class SQLiteMCPManager:
                         print(f"结构数据: {display_data}")
                 
                 self.stats["resources_accessed"] += 4
+                self.stats["total_operations"] += 4
                 self.stats["successful_operations"] += 4
             
         except Exception as e:
             print(f"❌ 数据库资源访问演示失败: {e}")
+            self.stats["total_operations"] += 1
             self.stats["failed_operations"] += 1
     
     async def demonstrate_intelligent_analysis(self):
@@ -427,10 +448,12 @@ class SQLiteMCPManager:
                     print("📊 数据库智能分析报告:")
                     print(response.content)
                     
+                    self.stats["total_operations"] += 1
                     self.stats["successful_operations"] += 1
             
         except Exception as e:
             print(f"❌ 智能数据分析演示失败: {e}")
+            self.stats["total_operations"] += 1
             self.stats["failed_operations"] += 1
     
     def _get_tool(self, tool_name: str):
@@ -489,12 +512,13 @@ class SQLiteMCPManager:
         print("📊 SQLite操作统计信息")
         print("="*50)
         
-        success_rate = (self.stats["successful_operations"] / max(self.stats["database_operations"], 1)) * 100
+        success_rate = (self.stats["successful_operations"] / max(self.stats["total_operations"], 1)) * 100
         
         print(f"🛠️  工具加载数量: {self.stats['tools_loaded']} 个")
-        print(f"💾 数据库操作总数: {self.stats['database_operations']}")
+        print(f"🎯 操作总数: {self.stats['total_operations']}")
         print(f"✅ 成功操作数: {self.stats['successful_operations']}")
         print(f"❌ 失败操作数: {self.stats['failed_operations']}")
+        print(f"💾 数据库操作: {self.stats['database_operations']}")
         print(f"📁 资源访问次数: {self.stats['resources_accessed']}")
         print(f"🔍 SQL查询次数: {self.stats['sql_queries']}")
         print(f"📈 操作成功率: {success_rate:.1f}%")

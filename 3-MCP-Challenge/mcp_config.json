@@ -39,6 +39,14 @@
       ],
       "env": {},
       "description": "企业级 MCP 网关服务器，提供服务注册、负载均衡、认证、监控等企业级功能"
+    },
+    "workflow-engine": {
+      "command": "python",
+      "args": [
+        "mcp_servers/workflow_engine_http.py"
+      ],
+      "env": {},
+      "description": "智能工作流引擎 HTTP MCP 服务器，提供工作流创建、执行、监控等功能，支持多模态数据处理和智能决策"
     }
   },
   "clientConfig": {

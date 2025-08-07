@@ -1,1242 +1,827 @@
 #!/usr/bin/env python3
 """
-3-MCP-Challenge - Challenge 8: 综合应用：智能工作流引擎
-难度：⭐⭐⭐⭐⭐⭐⭐⭐
+Challenge 8: 智能工作流编排与执行系统
+终极挑战 - 工作流引擎的完整实现与应用
 
-学习目标：
-1. 复杂工作流设计与执行
-2. 多模态数据处理
-3. 智能决策引擎
-4. 工作流可视化
-5. 错误恢复与重试机制
-6. 性能优化与缓存
-7. 实时监控与告警
+本挑战是MCP系列的最终挑战，集成了所有之前学到的概念和技术，
+提供了一个功能完整的智能工作流编排与执行系统。
 
-参考链接：
-- MCP Workflow Patterns: https://modelcontextprotocol.io/docs/workflow-patterns
-- MCP Multi-Modal: https://modelcontextprotocol.io/docs/multi-modal
-- MCP Performance: https://modelcontextprotocol.io/docs/performance
+挑战特色：
+1. 复杂的工作流定义和管理（YAML/JSON格式）
+2. 多步骤任务执行与协调
+3. 条件分支和循环控制
+4. 智能错误处理和重试机制
+5. 实时工作流状态监控
+6. 数据传递和变量管理
+7. 并发任务执行
+8. 工作流模板和继承
+9. 事件驱动触发器
+10. 性能指标和报告生成
 """
 
-import os
-import json
-import time
 import asyncio
-import hashlib
-import logging
-from datetime import datetime, timedelta
-from typing import Dict, List, Any, Optional, Union, Callable
-from dataclasses import dataclass, field, asdict
-from enum import Enum
-from collections import defaultdict, deque
-import sqlite3
-import uuid
-import base64
+import json
+import subprocess
+import time
+import signal
+import os
 from pathlib import Path
+import sys
 
-from langchain_openai import ChatOpenAI
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
-from langchain_core.prompts import ChatPromptTemplate, PromptTemplate
-from langgraph.graph import StateGraph, END
-from langgraph.graph.message import add_messages
-from typing_extensions import TypedDict, Annotated
+# 添加项目根目录到Python路径
+project_root = Path(__file__).parent.parent
+sys.path.append(str(project_root))
 
-from fastmcp import FastMCP
-from mcp import types
+from workflow_http_client import WorkflowHttpClient, SAMPLE_WORKFLOWS, print_welcome
 
-
-# 配置日志系统
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
-
-
-class WorkflowStatus(Enum):
-    """工作流状态枚举"""
-    PENDING = "pending"
-    RUNNING = "running"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    PAUSED = "paused"
-    CANCELLED = "cancelled"
-
-
-class NodeType(Enum):
-    """节点类型枚举"""
-    INPUT = "input"
-    PROCESSING = "processing"
-    DECISION = "decision"
-    OUTPUT = "output"
-    CONDITION = "condition"
-    LOOP = "loop"
-    PARALLEL = "parallel"
-
-
-@dataclass
-class WorkflowNode:
-    """工作流节点"""
-    id: str
-    name: str
-    node_type: NodeType
-    config: Dict[str, Any] = field(default_factory=dict)
-    inputs: List[str] = field(default_factory=list)
-    outputs: List[str] = field(default_factory=list)
-    conditions: Dict[str, str] = field(default_factory=dict)
-    retry_count: int = 0
-    max_retries: int = 3
-    timeout: float = 300.0
+async def check_workflow_server():
+    """检查工作流 HTTP 服务器是否运行"""
+    print("\n🔍 检查工作流引擎服务器状态...")
     
-    def __post_init__(self):
-        if not self.id:
-            self.id = str(uuid.uuid4())
-
-
-@dataclass
-class WorkflowEdge:
-    """工作流连接边"""
-    from_node: str
-    to_node: str
-    condition: Optional[str] = None
-    weight: float = 1.0
-
-
-@dataclass
-class WorkflowExecution:
-    """工作流执行记录"""
-    id: str
-    workflow_id: str
-    status: WorkflowStatus
-    start_time: datetime
-    end_time: Optional[datetime] = None
-    input_data: Dict[str, Any] = field(default_factory=dict)
-    output_data: Dict[str, Any] = field(default_factory=dict)
-    execution_log: List[Dict[str, Any]] = field(default_factory=list)
-    error_message: Optional[str] = None
+    client = WorkflowHttpClient()
+    try:
+        success = await client.initialize()
+        if success:
+            print("✅ 工作流引擎服务器已在运行")
+            await client.cleanup()
+            return True
+        await client.cleanup()
+    except Exception as e:
+        print(f"❌ 无法连接到工作流引擎服务器: {e}")
     
-    def __post_init__(self):
-        if not self.id:
-            self.id = str(uuid.uuid4())
+    print("❌ 工作流引擎服务器未运行")
+    print("   请先独立启动服务器:")
+    print("   python 3-MCP-Challenge/mcp_servers/workflow_engine_http.py")
+    return False
 
-
-@dataclass
-class WorkflowDefinition:
-    """工作流定义"""
-    id: str
-    name: str
-    description: str
-    version: str
-    nodes: List[WorkflowNode]
-    edges: List[WorkflowEdge]
-    global_config: Dict[str, Any] = field(default_factory=dict)
-    created_at: datetime = field(default_factory=datetime.now)
-    updated_at: datetime = field(default_factory=datetime.now)
+async def check_server_connection():
+    """检查服务器连接"""
+    print("\n🔗 检查服务器连接状态...")
     
-    def __post_init__(self):
-        if not self.id:
-            self.id = str(uuid.uuid4())
-
-
-class WorkflowState(TypedDict):
-    """LangGraph工作流状态"""
-    execution_id: str
-    current_node: str
-    data: Dict[str, Any]
-    context: Dict[str, Any]
-    errors: List[str]
-    iteration_count: int
-    start_time: float
-
-
-class MultiModalProcessor:
-    """多模态数据处理器"""
-    
-    def __init__(self):
-        self.llm = ChatOpenAI(model="gpt-4", temperature=0.1)
-    
-    async def process_text(self, content: str, task: str = "analyze") -> Dict[str, Any]:
-        """处理文本数据"""
-        try:
-            prompt = ChatPromptTemplate.from_messages([
-                ("system", "You are an expert text processor. Analyze the given text according to the task."),
-                ("human", f"Task: {task}\nContent: {content}")
-            ])
-            
-            result = await self.llm.ainvoke(prompt.format_messages())
-            return {
-                "type": "text",
-                "task": task,
-                "input_length": len(content),
-                "result": result.content,
-                "timestamp": datetime.now().isoformat()
-            }
-        except Exception as e:
-            logger.error(f"Text processing failed: {e}")
-            return {"error": str(e), "type": "text", "task": task}
-    
-    async def process_json(self, data: Dict[str, Any], task: str = "validate") -> Dict[str, Any]:
-        """处理JSON数据"""
-        try:
-            if task == "validate":
-                # 验证JSON结构
-                result = {
-                    "valid": True,
-                    "keys_count": len(data.keys()) if isinstance(data, dict) else 0,
-                    "data_type": type(data).__name__,
-                    "structure": self._analyze_json_structure(data)
-                }
-            elif task == "transform":
-                # 数据转换
-                result = self._transform_json_data(data)
-            elif task == "extract":
-                # 提取关键信息
-                result = self._extract_key_info(data)
-            else:
-                result = {"message": f"Unknown task: {task}"}
-            
-            return {
-                "type": "json",
-                "task": task,
-                "result": result,
-                "timestamp": datetime.now().isoformat()
-            }
-        except Exception as e:
-            logger.error(f"JSON processing failed: {e}")
-            return {"error": str(e), "type": "json", "task": task}
-    
-    async def process_file(self, file_path: str, task: str = "analyze") -> Dict[str, Any]:
-        """处理文件数据"""
-        try:
-            if not os.path.exists(file_path):
-                return {"error": "File not found", "path": file_path}
-            
-            file_info = {
-                "path": file_path,
-                "size": os.path.getsize(file_path),
-                "modified": datetime.fromtimestamp(os.path.getmtime(file_path)).isoformat(),
-                "extension": Path(file_path).suffix.lower()
-            }
-            
-            if file_info["extension"] in [".txt", ".md", ".py", ".js", ".html", ".css"]:
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    content = f.read()
-                    text_result = await self.process_text(content, task)
-                    file_info.update(text_result)
-            
-            return {
-                "type": "file",
-                "task": task,
-                "result": file_info,
-                "timestamp": datetime.now().isoformat()
-            }
-        except Exception as e:
-            logger.error(f"File processing failed: {e}")
-            return {"error": str(e), "type": "file", "path": file_path}
-    
-    def _analyze_json_structure(self, data: Any, max_depth: int = 3, current_depth: int = 0) -> Dict[str, Any]:
-        """分析JSON结构"""
-        if current_depth >= max_depth:
-            return {"truncated": True, "type": type(data).__name__}
-        
-        if isinstance(data, dict):
-            return {
-                "type": "object",
-                "keys": list(data.keys())[:10],  # 限制显示前10个键
-                "key_count": len(data),
-                "sample_values": {
-                    k: self._analyze_json_structure(v, max_depth, current_depth + 1)
-                    for k, v in list(data.items())[:3]  # 只分析前3个值
-                }
-            }
-        elif isinstance(data, list):
-            return {
-                "type": "array",
-                "length": len(data),
-                "sample_items": [
-                    self._analyze_json_structure(item, max_depth, current_depth + 1)
-                    for item in data[:3]  # 只分析前3个元素
-                ]
-            }
+    client = WorkflowHttpClient()
+    try:
+        success = await client.initialize()
+        if success:
+            print("✅ 成功连接到工作流引擎服务器")
+            return True
         else:
-            return {
-                "type": type(data).__name__,
-                "value": str(data)[:100] if isinstance(data, str) else data
-            }
-    
-    def _transform_json_data(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """转换JSON数据"""
-        # 这里实现数据转换逻辑
-        transformed = {}
-        for key, value in data.items():
-            # 示例转换：驼峰命名转下划线
-            new_key = self._camel_to_snake(key)
-            transformed[new_key] = value
-        return transformed
-    
-    def _camel_to_snake(self, name: str) -> str:
-        """驼峰命名转下划线命名"""
-        import re
-        s1 = re.sub('(.)([A-Z][a-z]+)', r'\1_\2', name)
-        return re.sub('([a-z0-9])([A-Z])', r'\1_\2', s1).lower()
-    
-    def _extract_key_info(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """提取关键信息"""
-        key_info = {
-            "summary": f"Data contains {len(data)} top-level fields",
-            "important_fields": [],
-            "data_types": defaultdict(int)
-        }
-        
-        for key, value in data.items():
-            key_info["data_types"][type(value).__name__] += 1
-            if any(keyword in key.lower() for keyword in ["id", "name", "title", "email", "status"]):
-                key_info["important_fields"].append({
-                    "field": key,
-                    "type": type(value).__name__,
-                    "value": str(value)[:50]
-                })
-        
-        return key_info
-
-
-class DecisionEngine:
-    """智能决策引擎"""
-    
-    def __init__(self):
-        self.llm = ChatOpenAI(model="gpt-4", temperature=0.1)
-        self.rules: List[Dict[str, Any]] = []
-    
-    def add_rule(self, name: str, condition: str, action: str, priority: int = 1):
-        """添加决策规则"""
-        self.rules.append({
-            "name": name,
-            "condition": condition,
-            "action": action,
-            "priority": priority,
-            "created_at": datetime.now()
-        })
-        # 按优先级排序
-        self.rules.sort(key=lambda x: x["priority"], reverse=True)
-    
-    async def make_decision(self, context: Dict[str, Any], 
-                           question: str = None) -> Dict[str, Any]:
-        """做出智能决策"""
-        try:
-            # 首先尝试基于规则的决策
-            rule_decision = self._apply_rules(context)
-            if rule_decision:
-                return {
-                    "type": "rule_based",
-                    "decision": rule_decision,
-                    "confidence": 0.9,
-                    "reasoning": f"Applied rule: {rule_decision['rule_name']}"
-                }
-            
-            # 如果没有匹配的规则，使用LLM决策
-            if question:
-                llm_decision = await self._llm_decision(context, question)
-                return {
-                    "type": "llm_based",
-                    "decision": llm_decision,
-                    "confidence": 0.7,
-                    "reasoning": "Generated by language model"
-                }
-            
-            # 默认决策
-            return {
-                "type": "default",
-                "decision": {"action": "continue", "next_node": None},
-                "confidence": 0.5,
-                "reasoning": "No matching rules or specific question"
-            }
-            
-        except Exception as e:
-            logger.error(f"Decision making failed: {e}")
-            return {
-                "type": "error",
-                "decision": {"action": "abort", "error": str(e)},
-                "confidence": 0.0,
-                "reasoning": f"Error occurred: {e}"
-            }
-    
-    def _apply_rules(self, context: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """应用规则决策"""
-        for rule in self.rules:
-            try:
-                # 简单的条件评估（实际应用中应该使用更安全的表达式评估器）
-                condition = rule["condition"]
-                # 替换上下文变量
-                for key, value in context.items():
-                    condition = condition.replace(f"{{{key}}}", str(value))
-                
-                # 评估条件（注意：这里使用eval是不安全的，仅用于演示）
-                if self._safe_eval(condition, context):
-                    return {
-                        "rule_name": rule["name"],
-                        "action": rule["action"],
-                        "matched_condition": rule["condition"]
-                    }
-            except Exception as e:
-                logger.warning(f"Rule evaluation failed for {rule['name']}: {e}")
-                continue
-        
-        return None
-    
-    def _safe_eval(self, expression: str, context: Dict[str, Any]) -> bool:
-        """安全的表达式评估"""
-        # 这是一个简化的实现，实际应用中应该使用更安全的表达式评估库
-        try:
-            # 只允许简单的比较操作
-            allowed_chars = set("0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_<>=!&| ()")
-            if not all(c in allowed_chars for c in expression):
-                return False
-            
-            # 创建安全的评估环境
-            safe_dict = {
-                "__builtins__": {},
-                "True": True,
-                "False": False
-            }
-            safe_dict.update(context)
-            
-            return eval(expression, safe_dict)
-        except:
+            print("❌ 无法连接到工作流引擎服务器")
             return False
-    
-    async def _llm_decision(self, context: Dict[str, Any], question: str) -> Dict[str, Any]:
-        """基于LLM的决策"""
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", """You are an intelligent decision engine. Based on the provided context and question, 
-            make a decision and provide your reasoning. Respond in JSON format with the following structure:
-            {
-                "action": "continue|pause|retry|abort|branch",
-                "next_node": "node_id or null",
-                "parameters": {},
-                "reasoning": "explanation of the decision"
-            }"""),
-            ("human", f"Context: {json.dumps(context, indent=2)}\n\nQuestion: {question}")
-        ])
-        
-        result = await self.llm.ainvoke(prompt.format_messages())
-        try:
-            return json.loads(result.content)
-        except:
-            return {
-                "action": "continue",
-                "reasoning": result.content,
-                "parameters": {}
-            }
+    except Exception as e:
+        print(f"❌ 连接检查失败: {e}")
+        return False
+    finally:
+        await client.cleanup()
 
+async def demonstrate_workflow_creation():
+    """演示工作流创建功能"""
+    print("\n🔧 演示 1: 工作流创建和验证")
+    print("-" * 50)
+    
+    client = WorkflowHttpClient()
+    await client.initialize()
+    
+    try:
+        # 首先验证工作流定义
+        workflow_def = SAMPLE_WORKFLOWS["simple_file_processing"]
+        print(f"📋 验证工作流定义: {workflow_def['name']}")
+        
+        validation_result = await client.validate_workflow_definition(workflow_def)
+        if validation_result["success"] and validation_result["is_valid"]:
+            print("✅ 工作流定义有效")
+            
+            # 创建工作流
+            create_result = await client.create_workflow(workflow_def)
+            if create_result["success"]:
+                workflow_id = create_result["workflow_id"]
+                print(f"✅ 工作流创建成功，ID: {workflow_id}")
+                return workflow_id
+            else:
+                print(f"❌ 工作流创建失败: {create_result.get('message', '未知错误')}")
+        else:
+            print("❌ 工作流定义无效")
+            
+    except Exception as e:
+        print(f"❌ 演示过程发生错误: {e}")
+    finally:
+        await client.cleanup()
+    
+    return None
 
-class WorkflowEngine:
-    """工作流引擎"""
+async def demonstrate_template_usage():
+    """演示模板使用功能"""
+    print("\n🎨 演示 2: 工作流模板使用")
+    print("-" * 50)
     
-    def __init__(self):
-        self.workflows: Dict[str, WorkflowDefinition] = {}
-        self.executions: Dict[str, WorkflowExecution] = {}
-        self.processor = MultiModalProcessor()
-        self.decision_engine = DecisionEngine()
-        self.db_path = "workflow_engine.db"
-        self._init_database()
+    client = WorkflowHttpClient()
+    await client.initialize()
     
-    def _init_database(self):
-        """初始化数据库"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS workflows (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                definition TEXT NOT NULL,
-                created_at TIMESTAMP,
-                updated_at TIMESTAMP
-            )
-        ''')
-        
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS executions (
-                id TEXT PRIMARY KEY,
-                workflow_id TEXT NOT NULL,
-                status TEXT NOT NULL,
-                input_data TEXT,
-                output_data TEXT,
-                execution_log TEXT,
-                start_time TIMESTAMP,
-                end_time TIMESTAMP,
-                error_message TEXT,
-                FOREIGN KEY (workflow_id) REFERENCES workflows (id)
-            )
-        ''')
-        
-        conn.commit()
-        conn.close()
-    
-    async def create_workflow(self, definition: WorkflowDefinition) -> str:
-        """创建工作流"""
-        self.workflows[definition.id] = definition
-        
-        # 保存到数据库
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            INSERT OR REPLACE INTO workflows 
-            (id, name, definition, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (
-            definition.id,
-            definition.name,
-            json.dumps(asdict(definition)),
-            definition.created_at,
-            definition.updated_at
-        ))
-        
-        conn.commit()
-        conn.close()
-        
-        logger.info(f"Workflow created: {definition.name} ({definition.id})")
-        return definition.id
-    
-    async def execute_workflow(self, workflow_id: str, 
-                              input_data: Dict[str, Any] = None) -> str:
-        """执行工作流"""
-        if workflow_id not in self.workflows:
-            raise ValueError(f"Workflow not found: {workflow_id}")
-        
-        workflow = self.workflows[workflow_id]
-        execution = WorkflowExecution(
-            id=str(uuid.uuid4()),
-            workflow_id=workflow_id,
-            status=WorkflowStatus.PENDING,
-            start_time=datetime.now(),
-            input_data=input_data or {}
-        )
-        
-        self.executions[execution.id] = execution
-        
-        # 异步执行工作流
-        asyncio.create_task(self._run_workflow_execution(execution, workflow))
-        
-        return execution.id
-    
-    async def _run_workflow_execution(self, execution: WorkflowExecution, 
-                                    workflow: WorkflowDefinition):
-        """运行工作流执行"""
-        try:
-            execution.status = WorkflowStatus.RUNNING
-            self._log_execution(execution, "Workflow execution started")
+    try:
+        # 获取可用模板
+        templates_result = await client.get_workflow_templates()
+        if templates_result["success"]:
+            templates = templates_result["templates"]
+            print(f"📂 可用模板数量: {len(templates)}")
             
-            # 构建LangGraph
-            graph = self._build_langgraph(workflow)
+            for template_id, template_info in templates.items():
+                print(f"  📋 {template_id}: {template_info['name']}")
             
-            # 初始状态
-            initial_state: WorkflowState = {
-                "execution_id": execution.id,
-                "current_node": self._find_start_node(workflow),
-                "data": execution.input_data.copy(),
-                "context": {"workflow_id": workflow.id, "execution_id": execution.id},
-                "errors": [],
-                "iteration_count": 0,
-                "start_time": time.time()
+            # 使用计算工作流模板创建工作流
+            print(f"\n🔄 使用模板创建工作流: calculation_workflow")
+            customization = {
+                "name": "自定义数学计算工作流",
+                "variables": {
+                    "number_a": {"default": 25.5},
+                    "number_b": {"default": 4.2},
+                    "operation": {"default": "add"}
+                }
             }
+            
+            result = await client.create_workflow_from_template(
+                "calculation_workflow", 
+                customization
+            )
+            
+            if result["success"]:
+                workflow_id = result["workflow_id"]
+                print(f"✅ 基于模板创建工作流成功，ID: {workflow_id}")
+                return workflow_id
+            else:
+                print(f"❌ 基于模板创建失败: {result.get('message', '未知错误')}")
+        else:
+            print("❌ 获取模板失败")
+            
+    except Exception as e:
+        print(f"❌ 演示过程发生错误: {e}")
+    finally:
+        await client.cleanup()
+    
+    return None
+
+async def demonstrate_workflow_execution():
+    """演示工作流执行功能"""
+    print("\n⚡ 演示 3: 工作流执行与监控")
+    print("-" * 50)
+    
+    client = WorkflowHttpClient()
+    await client.initialize()
+    
+    try:
+        # 创建一个用于演示的工作流 - 使用新的综合MCP工具演示
+        demo_workflow = SAMPLE_WORKFLOWS["comprehensive_mcp_workflow"]
+        create_result = await client.create_workflow(demo_workflow)
+        
+        if create_result["success"]:
+            workflow_id = create_result["workflow_id"]
+            print(f"✅ 创建演示工作流成功，ID: {workflow_id}")
             
             # 执行工作流
-            result = await graph.ainvoke(initial_state)
-            
-            # 更新执行结果
-            execution.status = WorkflowStatus.COMPLETED
-            execution.end_time = datetime.now()
-            execution.output_data = result.get("data", {})
-            
-            self._log_execution(execution, "Workflow execution completed successfully")
-            
-        except Exception as e:
-            execution.status = WorkflowStatus.FAILED
-            execution.end_time = datetime.now()
-            execution.error_message = str(e)
-            
-            logger.error(f"Workflow execution failed: {e}")
-            self._log_execution(execution, f"Workflow execution failed: {e}")
-        
-        # 保存执行记录到数据库
-        self._save_execution_to_db(execution)
-    
-    def _build_langgraph(self, workflow: WorkflowDefinition) -> StateGraph:
-        """构建LangGraph"""
-        graph = StateGraph(WorkflowState)
-        
-        # 添加节点
-        for node in workflow.nodes:
-            if node.node_type == NodeType.INPUT:
-                graph.add_node(node.id, self._create_input_node(node))
-            elif node.node_type == NodeType.PROCESSING:
-                graph.add_node(node.id, self._create_processing_node(node))
-            elif node.node_type == NodeType.DECISION:
-                graph.add_node(node.id, self._create_decision_node(node))
-            elif node.node_type == NodeType.OUTPUT:
-                graph.add_node(node.id, self._create_output_node(node))
-            elif node.node_type == NodeType.CONDITION:
-                graph.add_node(node.id, self._create_condition_node(node))
-        
-        # 添加连接
-        for edge in workflow.edges:
-            if edge.condition:
-                graph.add_conditional_edges(
-                    edge.from_node,
-                    self._create_condition_function(edge.condition),
-                    {True: edge.to_node, False: END}
-                )
-            else:
-                graph.add_edge(edge.from_node, edge.to_node)
-        
-        # 设置入口点
-        start_node = self._find_start_node(workflow)
-        if start_node:
-            graph.set_entry_point(start_node)
-        
-        return graph.compile()
-    
-    def _create_input_node(self, node: WorkflowNode) -> Callable:
-        """创建输入节点"""
-        async def input_node(state: WorkflowState) -> WorkflowState:
-            try:
-                # 处理输入数据
-                input_config = node.config
-                input_type = input_config.get("type", "text")
-                
-                if input_type == "file" and "path" in state["data"]:
-                    result = await self.processor.process_file(
-                        state["data"]["path"], 
-                        input_config.get("task", "analyze")
-                    )
-                    state["data"]["processed_input"] = result
-                elif input_type == "json":
-                    result = await self.processor.process_json(
-                        state["data"], 
-                        input_config.get("task", "validate")
-                    )
-                    state["data"]["processed_input"] = result
-                else:
-                    # 文本输入
-                    content = state["data"].get("content", "")
-                    result = await self.processor.process_text(
-                        content, 
-                        input_config.get("task", "analyze")
-                    )
-                    state["data"]["processed_input"] = result
-                
-                state["current_node"] = node.id
-                return state
-                
-            except Exception as e:
-                state["errors"].append(f"Input node {node.id} failed: {e}")
-                return state
-        
-        return input_node
-    
-    def _create_processing_node(self, node: WorkflowNode) -> Callable:
-        """创建处理节点"""
-        async def processing_node(state: WorkflowState) -> WorkflowState:
-            try:
-                processing_type = node.config.get("type", "transform")
-                input_data = state["data"]
-                
-                if processing_type == "transform":
-                    # 数据转换
-                    result = self._transform_data(input_data, node.config)
-                elif processing_type == "validate":
-                    # 数据验证
-                    result = self._validate_data(input_data, node.config)
-                elif processing_type == "enrich":
-                    # 数据丰富
-                    result = await self._enrich_data(input_data, node.config)
-                else:
-                    result = input_data
-                
-                state["data"][f"{node.id}_output"] = result
-                state["current_node"] = node.id
-                return state
-                
-            except Exception as e:
-                state["errors"].append(f"Processing node {node.id} failed: {e}")
-                return state
-        
-        return processing_node
-    
-    def _create_decision_node(self, node: WorkflowNode) -> Callable:
-        """创建决策节点"""
-        async def decision_node(state: WorkflowState) -> WorkflowState:
-            try:
-                question = node.config.get("question", "What should be the next action?")
-                context = {
-                    "current_data": state["data"],
-                    "execution_context": state["context"],
-                    "node_config": node.config
-                }
-                
-                decision = await self.decision_engine.make_decision(context, question)
-                
-                state["data"][f"{node.id}_decision"] = decision
-                state["current_node"] = node.id
-                
-                # 根据决策结果设置下一个节点
-                if decision.get("decision", {}).get("next_node"):
-                    state["context"]["next_node"] = decision["decision"]["next_node"]
-                
-                return state
-                
-            except Exception as e:
-                state["errors"].append(f"Decision node {node.id} failed: {e}")
-                return state
-        
-        return decision_node
-    
-    def _create_output_node(self, node: WorkflowNode) -> Callable:
-        """创建输出节点"""
-        async def output_node(state: WorkflowState) -> WorkflowState:
-            try:
-                output_config = node.config
-                output_format = output_config.get("format", "json")
-                
-                if output_format == "json":
-                    state["data"]["final_output"] = state["data"]
-                elif output_format == "summary":
-                    # 生成摘要
-                    summary = self._generate_summary(state["data"])
-                    state["data"]["final_output"] = {"summary": summary}
-                
-                state["current_node"] = node.id
-                return state
-                
-            except Exception as e:
-                state["errors"].append(f"Output node {node.id} failed: {e}")
-                return state
-        
-        return output_node
-    
-    def _create_condition_node(self, node: WorkflowNode) -> Callable:
-        """创建条件节点"""
-        async def condition_node(state: WorkflowState) -> WorkflowState:
-            try:
-                conditions = node.config.get("conditions", {})
-                
-                for condition_name, condition_expr in conditions.items():
-                    result = self.decision_engine._safe_eval(condition_expr, state["data"])
-                    state["data"][f"{node.id}_{condition_name}"] = result
-                
-                state["current_node"] = node.id
-                return state
-                
-            except Exception as e:
-                state["errors"].append(f"Condition node {node.id} failed: {e}")
-                return state
-        
-        return condition_node
-    
-    def _create_condition_function(self, condition: str) -> Callable:
-        """创建条件判断函数"""
-        def condition_func(state: WorkflowState) -> bool:
-            try:
-                return self.decision_engine._safe_eval(condition, state["data"])
-            except:
-                return False
-        
-        return condition_func
-    
-    def _find_start_node(self, workflow: WorkflowDefinition) -> Optional[str]:
-        """查找开始节点"""
-        # 查找没有输入的节点作为开始节点
-        all_to_nodes = {edge.to_node for edge in workflow.edges}
-        for node in workflow.nodes:
-            if node.id not in all_to_nodes:
-                return node.id
-        
-        # 如果没有找到，返回第一个输入节点
-        for node in workflow.nodes:
-            if node.node_type == NodeType.INPUT:
-                return node.id
-        
-        # 最后返回第一个节点
-        return workflow.nodes[0].id if workflow.nodes else None
-    
-    def _transform_data(self, data: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
-        """数据转换"""
-        # 这里实现数据转换逻辑
-        transformed = data.copy()
-        
-        # 示例转换规则
-        rules = config.get("rules", [])
-        for rule in rules:
-            if rule["type"] == "rename":
-                old_key = rule["from"]
-                new_key = rule["to"]
-                if old_key in transformed:
-                    transformed[new_key] = transformed.pop(old_key)
-            elif rule["type"] == "calculate":
-                # 简单计算
-                expression = rule["expression"]
-                try:
-                    result = eval(expression, {"__builtins__": {}}, transformed)
-                    transformed[rule["target"]] = result
-                except:
-                    pass
-        
-        return transformed
-    
-    def _validate_data(self, data: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
-        """数据验证"""
-        validation_result = {
-            "valid": True,
-            "errors": [],
-            "warnings": []
-        }
-        
-        required_fields = config.get("required_fields", [])
-        for field in required_fields:
-            if field not in data:
-                validation_result["valid"] = False
-                validation_result["errors"].append(f"Missing required field: {field}")
-        
-        type_checks = config.get("type_checks", {})
-        for field, expected_type in type_checks.items():
-            if field in data:
-                actual_type = type(data[field]).__name__
-                if actual_type != expected_type:
-                    validation_result["warnings"].append(
-                        f"Field {field} expected {expected_type}, got {actual_type}"
-                    )
-        
-        return validation_result
-    
-    async def _enrich_data(self, data: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
-        """数据丰富"""
-        enriched = data.copy()
-        
-        # 添加时间戳
-        if config.get("add_timestamp", False):
-            enriched["timestamp"] = datetime.now().isoformat()
-        
-        # 添加ID
-        if config.get("add_id", False):
-            enriched["id"] = str(uuid.uuid4())
-        
-        # 计算统计信息
-        if config.get("add_stats", False):
-            stats = {
-                "field_count": len(enriched),
-                "text_fields": len([v for v in enriched.values() if isinstance(v, str)]),
-                "numeric_fields": len([v for v in enriched.values() if isinstance(v, (int, float))])
+            execution_variables = {
+                "input_value": 75.0,
+                "multiplier": 3.2
             }
-            enriched["stats"] = stats
-        
-        return enriched
-    
-    def _generate_summary(self, data: Dict[str, Any]) -> str:
-        """生成数据摘要"""
-        summary_parts = []
-        
-        summary_parts.append(f"Data contains {len(data)} fields")
-        
-        for key, value in data.items():
-            if isinstance(value, dict):
-                summary_parts.append(f"{key}: object with {len(value)} properties")
-            elif isinstance(value, list):
-                summary_parts.append(f"{key}: array with {len(value)} items")
-            elif isinstance(value, str):
-                summary_parts.append(f"{key}: text ({len(value)} characters)")
+            
+            print(f"🚀 启动工作流执行...")
+            execute_result = await client.execute_workflow(workflow_id, execution_variables)
+            
+            if execute_result["success"]:
+                execution_id = execute_result["execution_id"]
+                print(f"✅ 工作流开始执行，执行ID: {execution_id}")
+                
+                # 监控执行过程
+                await client.monitor_workflow_execution(execution_id, check_interval=3)
+                
+                return execution_id
             else:
-                summary_parts.append(f"{key}: {type(value).__name__} value")
-        
-        return "; ".join(summary_parts)
-    
-    def _log_execution(self, execution: WorkflowExecution, message: str):
-        """记录执行日志"""
-        log_entry = {
-            "timestamp": datetime.now().isoformat(),
-            "message": message,
-            "status": execution.status.value
-        }
-        execution.execution_log.append(log_entry)
-        logger.info(f"[{execution.id}] {message}")
-    
-    def _save_execution_to_db(self, execution: WorkflowExecution):
-        """保存执行记录到数据库"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            INSERT OR REPLACE INTO executions 
-            (id, workflow_id, status, input_data, output_data, execution_log, 
-             start_time, end_time, error_message)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            execution.id,
-            execution.workflow_id,
-            execution.status.value,
-            json.dumps(execution.input_data),
-            json.dumps(execution.output_data),
-            json.dumps(execution.execution_log),
-            execution.start_time,
-            execution.end_time,
-            execution.error_message
-        ))
-        
-        conn.commit()
-        conn.close()
-    
-    async def get_execution_status(self, execution_id: str) -> Optional[WorkflowExecution]:
-        """获取执行状态"""
-        return self.executions.get(execution_id)
-    
-    async def cancel_execution(self, execution_id: str) -> bool:
-        """取消执行"""
-        execution = self.executions.get(execution_id)
-        if execution and execution.status in [WorkflowStatus.PENDING, WorkflowStatus.RUNNING]:
-            execution.status = WorkflowStatus.CANCELLED
-            execution.end_time = datetime.now()
-            self._log_execution(execution, "Execution cancelled by user")
-            return True
-        return False
-    
-    async def get_workflow_metrics(self, workflow_id: str) -> Dict[str, Any]:
-        """获取工作流指标"""
-        executions = [e for e in self.executions.values() if e.workflow_id == workflow_id]
-        
-        if not executions:
-            return {"error": "No executions found for this workflow"}
-        
-        total_executions = len(executions)
-        completed = len([e for e in executions if e.status == WorkflowStatus.COMPLETED])
-        failed = len([e for e in executions if e.status == WorkflowStatus.FAILED])
-        
-        avg_duration = 0
-        completed_executions = [e for e in executions 
-                              if e.status == WorkflowStatus.COMPLETED and e.end_time]
-        if completed_executions:
-            total_duration = sum(
-                (e.end_time - e.start_time).total_seconds() 
-                for e in completed_executions
-            )
-            avg_duration = total_duration / len(completed_executions)
-        
-        return {
-            "workflow_id": workflow_id,
-            "total_executions": total_executions,
-            "completed": completed,
-            "failed": failed,
-            "success_rate": (completed / total_executions) * 100 if total_executions > 0 else 0,
-            "avg_duration_seconds": avg_duration,
-            "last_execution": max(executions, key=lambda x: x.start_time).start_time.isoformat()
-        }
-
-
-class SmartWorkflowDemo:
-    """智能工作流引擎演示"""
-    
-    def __init__(self):
-        self.engine = WorkflowEngine()
-        self._setup_decision_rules()
-    
-    def _setup_decision_rules(self):
-        """设置决策规则"""
-        # 添加一些示例决策规则
-        self.engine.decision_engine.add_rule(
-            name="high_priority_rule",
-            condition="priority > 8",
-            action="expedite",
-            priority=10
-        )
-        
-        self.engine.decision_engine.add_rule(
-            name="error_handling_rule",
-            condition="len(errors) > 0",
-            action="retry_or_abort",
-            priority=9
-        )
-        
-        self.engine.decision_engine.add_rule(
-            name="data_size_rule",
-            condition="data_size > 1000000",
-            action="batch_process",
-            priority=5
-        )
-    
-    async def run_demo(self):
-        """运行演示"""
-        print("🤖 智能工作流引擎演示")
-        print("=" * 60)
-        
-        try:
-            await self._demonstrate_workflow_creation()
-            await self._demonstrate_multimodal_processing()
-            await self._demonstrate_decision_engine()
-            await self._demonstrate_workflow_execution()
-            await self._demonstrate_monitoring_and_metrics()
+                print(f"❌ 工作流执行失败: {execute_result.get('message', '未知错误')}")
+        else:
+            print(f"❌ 创建工作流失败: {create_result.get('message', '未知错误')}")
             
-        except Exception as e:
-            logger.error(f"Demo failed: {e}")
+    except KeyboardInterrupt:
+        print("\n⏹️ 用户中断了执行监控")
+    except Exception as e:
+        print(f"❌ 演示过程发生错误: {e}")
+    finally:
+        await client.cleanup()
     
-    async def _demonstrate_workflow_creation(self):
-        """演示工作流创建"""
-        print("\n📋 工作流创建演示")
-        print("-" * 40)
-        
-        # 创建数据处理工作流
-        nodes = [
-            WorkflowNode(
-                id="input_1",
-                name="数据输入",
-                node_type=NodeType.INPUT,
-                config={"type": "json", "task": "validate"}
-            ),
-            WorkflowNode(
-                id="process_1",
-                name="数据处理",
-                node_type=NodeType.PROCESSING,
-                config={
-                    "type": "transform",
-                    "rules": [
-                        {"type": "rename", "from": "old_name", "to": "new_name"}
-                    ]
+    return None
+
+async def demonstrate_error_handling():
+    """演示错误处理和重试机制"""
+    print("\n🛡️ 演示 4: 错误处理和重试机制")
+    print("-" * 50)
+    
+    client = WorkflowHttpClient()
+    await client.initialize()
+    
+    try:
+        # 创建包含错误处理的工作流，使用模板
+        execute_result = await client.create_workflow_from_template(
+            "error_handling_workflow", 
+            {
+                "name": "错误处理演示",
+                "variables": {
+                    "input_value": {"default": "test_input_data"}
                 }
-            ),
-            WorkflowNode(
-                id="decision_1",
-                name="智能决策",
-                node_type=NodeType.DECISION,
-                config={"question": "Should we proceed with further processing?"}
-            ),
-            WorkflowNode(
-                id="output_1",
-                name="结果输出",
-                node_type=NodeType.OUTPUT,
-                config={"format": "summary"}
-            )
-        ]
-        
-        edges = [
-            WorkflowEdge("input_1", "process_1"),
-            WorkflowEdge("process_1", "decision_1"),
-            WorkflowEdge("decision_1", "output_1")
-        ]
-        
-        workflow = WorkflowDefinition(
-            id="demo_workflow_1",
-            name="数据处理工作流",
-            description="演示数据输入、处理、决策和输出的完整流程",
-            version="1.0.0",
-            nodes=nodes,
-            edges=edges
-        )
-        
-        workflow_id = await self.engine.create_workflow(workflow)
-        print(f"✅ 创建工作流成功: {workflow.name} (ID: {workflow_id})")
-        print(f"   节点数: {len(nodes)}")
-        print(f"   连接数: {len(edges)}")
-        
-        return workflow_id
-    
-    async def _demonstrate_multimodal_processing(self):
-        """演示多模态处理"""
-        print("\n🎭 多模态数据处理演示")
-        print("-" * 40)
-        
-        # 文本处理
-        text_result = await self.engine.processor.process_text(
-            "This is a sample text for analysis. It contains important information about our product.",
-            "analyze"
-        )
-        print(f"📝 文本处理结果: {text_result['result'][:100]}...")
-        
-        # JSON处理
-        json_data = {
-            "productName": "Smart Widget",
-            "price": 99.99,
-            "category": "Electronics",
-            "features": ["WiFi", "Bluetooth", "Voice Control"],
-            "availability": True
-        }
-        json_result = await self.engine.processor.process_json(json_data, "transform")
-        print(f"📊 JSON处理结果: {json_result['result']}")
-        
-        # 文件处理（如果存在README.md）
-        readme_path = "README.md"
-        if os.path.exists(readme_path):
-            file_result = await self.engine.processor.process_file(readme_path, "analyze")
-            print(f"📁 文件处理结果: {file_result['result']['size']} bytes")
-    
-    async def _demonstrate_decision_engine(self):
-        """演示决策引擎"""
-        print("\n🧠 决策引擎演示")
-        print("-" * 40)
-        
-        # 测试不同的决策场景
-        test_contexts = [
-            {
-                "name": "高优先级任务",
-                "context": {"priority": 9, "data_size": 500, "errors": []},
-                "question": "How should we handle this high priority task?"
-            },
-            {
-                "name": "错误处理场景",
-                "context": {"priority": 5, "data_size": 1000, "errors": ["connection timeout"]},
-                "question": "What should we do about the errors?"
-            },
-            {
-                "name": "大数据处理",
-                "context": {"priority": 3, "data_size": 2000000, "errors": []},
-                "question": "How to handle this large dataset?"
             }
-        ]
-        
-        for test in test_contexts:
-            decision = await self.engine.decision_engine.make_decision(
-                test["context"], test["question"]
-            )
-            print(f"🎯 {test['name']}:")
-            print(f"   决策类型: {decision['type']}")
-            print(f"   置信度: {decision['confidence']}")
-            print(f"   推理: {decision['reasoning']}")
-            print()
-    
-    async def _demonstrate_workflow_execution(self):
-        """演示工作流执行"""
-        print("\n🚀 工作流执行演示")
-        print("-" * 40)
-        
-        # 创建简单的工作流
-        workflow_id = await self._create_demo_workflow()
-        
-        # 执行工作流
-        input_data = {
-            "content": "This is input data for processing",
-            "old_name": "legacy_field",
-            "priority": 7,
-            "data_size": 1500
-        }
-        
-        execution_id = await self.engine.execute_workflow(workflow_id, input_data)
-        print(f"🎬 开始执行工作流: {execution_id}")
-        
-        # 等待执行完成
-        max_wait = 30  # 最大等待30秒
-        wait_count = 0
-        while wait_count < max_wait:
-            execution = await self.engine.get_execution_status(execution_id)
-            if execution and execution.status in [
-                WorkflowStatus.COMPLETED, 
-                WorkflowStatus.FAILED, 
-                WorkflowStatus.CANCELLED
-            ]:
-                break
-            await asyncio.sleep(1)
-            wait_count += 1
-        
-        # 显示执行结果
-        execution = await self.engine.get_execution_status(execution_id)
-        if execution:
-            print(f"📊 执行状态: {execution.status.value}")
-            if execution.status == WorkflowStatus.COMPLETED:
-                print(f"✅ 执行成功!")
-                print(f"   输出数据键数: {len(execution.output_data)}")
-                print(f"   执行日志条数: {len(execution.execution_log)}")
-            elif execution.status == WorkflowStatus.FAILED:
-                print(f"❌ 执行失败: {execution.error_message}")
-        
-        return execution_id
-    
-    async def _create_demo_workflow(self) -> str:
-        """创建演示工作流"""
-        nodes = [
-            WorkflowNode(
-                id="input_demo",
-                name="输入节点",
-                node_type=NodeType.INPUT,
-                config={"type": "text", "task": "analyze"}
-            ),
-            WorkflowNode(
-                id="process_demo",
-                name="处理节点",
-                node_type=NodeType.PROCESSING,
-                config={
-                    "type": "enrich",
-                    "add_timestamp": True,
-                    "add_stats": True
-                }
-            ),
-            WorkflowNode(
-                id="output_demo",
-                name="输出节点",
-                node_type=NodeType.OUTPUT,
-                config={"format": "summary"}
-            )
-        ]
-        
-        edges = [
-            WorkflowEdge("input_demo", "process_demo"),
-            WorkflowEdge("process_demo", "output_demo")
-        ]
-        
-        workflow = WorkflowDefinition(
-            id="simple_demo_workflow",
-            name="简单演示工作流",
-            description="用于演示的简单工作流",
-            version="1.0.0",
-            nodes=nodes,
-            edges=edges
         )
         
-        return await self.engine.create_workflow(workflow)
-    
-    async def _demonstrate_monitoring_and_metrics(self):
-        """演示监控和指标"""
-        print("\n📈 监控和指标演示")
-        print("-" * 40)
-        
-        # 获取工作流指标
-        for workflow_id in self.engine.workflows.keys():
-            metrics = await self.engine.get_workflow_metrics(workflow_id)
+        if execute_result["success"]:
+            workflow_id = execute_result["workflow_id"]
+            print(f"✅ 创建错误处理演示工作流，ID: {workflow_id}")
             
-            if "error" not in metrics:
-                workflow_name = self.engine.workflows[workflow_id].name
-                print(f"📊 工作流: {workflow_name}")
-                print(f"   总执行次数: {metrics['total_executions']}")
-                print(f"   成功次数: {metrics['completed']}")
-                print(f"   失败次数: {metrics['failed']}")
-                print(f"   成功率: {metrics['success_rate']:.1f}%")
-                if metrics['avg_duration_seconds'] > 0:
-                    print(f"   平均执行时间: {metrics['avg_duration_seconds']:.2f}秒")
+            # 执行包含错误处理的工作流
+            execute_result = await client.execute_workflow(workflow_id, {"input_value": "valid_test_data"})
+            
+            if execute_result["success"]:
+                execution_id = execute_result["execution_id"]
+                print(f"🚀 开始执行错误处理演示...")
+                
+                # 监控执行过程，观察重试和错误处理
+                await client.monitor_workflow_execution(execution_id, check_interval=2)
+                
+            else:
+                print(f"❌ 工作流执行失败: {execute_result.get('message', '未知错误')}")
+        else:
+            print(f"❌ 创建工作流失败: {execute_result.get('message', '未知错误')}")
+            
+    except Exception as e:
+        print(f"❌ 演示过程发生错误: {e}")
+    finally:
+        await client.cleanup()
+
+async def demonstrate_workflow_management():
+    """演示工作流管理功能"""
+    print("\n📊 演示 5: 工作流管理和状态查询")
+    print("-" * 50)
+    
+    client = WorkflowHttpClient()
+    await client.initialize()
+    
+    try:
+        # 列出所有工作流
+        workflows_result = await client.list_workflows()
+        if workflows_result["success"]:
+            workflows = workflows_result["workflows"]
+            print(f"📋 系统中共有 {len(workflows)} 个工作流:")
+            
+            for workflow in workflows[:5]:  # 显示前5个
+                print(f"  🔹 {workflow.get('name', 'Unknown')}: {workflow.get('id', 'N/A')}")
+            
+            if len(workflows) > 5:
+                print(f"  ... 还有 {len(workflows) - 5} 个工作流")
+        
+        # 列出执行历史
+        print(f"\n🕒 查询执行历史:")
+        executions_result = await client.list_executions()
+        if executions_result["success"]:
+            executions = executions_result["executions"]
+            print(f"📈 共有 {len(executions)} 次执行记录:")
+            
+            for execution in executions[-3:]:  # 显示最近3次
+                print(f"  📊 执行ID: {execution['execution_id'][:8]}...")
+                print(f"      状态: {execution['status']}")
+                print(f"      开始时间: {execution['start_time']}")
+                if execution.get('total_execution_time'):
+                    print(f"      耗时: {execution['total_execution_time']:.2f}秒")
                 print()
         
-        # 显示系统概览
-        total_workflows = len(self.engine.workflows)
-        total_executions = len(self.engine.executions)
+        # 如果有执行记录，生成最新的执行报告
+        if executions and len(executions) > 0:
+            latest_execution = executions[-1]
+            execution_id = latest_execution["execution_id"]
+            
+            print(f"📋 生成最新执行报告: {execution_id[:8]}...")
+            report_result = await client.generate_execution_report(execution_id)
+            
+            if report_result["success"]:
+                report = report_result["report"]
+                print(f"✅ 报告生成成功")
+                print(f"    工作流: {report['workflow_name']}")
+                print(f"    总任务: {report['task_statistics']['total']}")
+                print(f"    成功率: {report['task_statistics']['success_rate']:.1%}")
+            else:
+                print(f"❌ 报告生成失败")
         
-        print(f"🎯 系统概览:")
-        print(f"   工作流总数: {total_workflows}")
-        print(f"   执行总数: {total_executions}")
+    except Exception as e:
+        print(f"❌ 演示过程发生错误: {e}")
+    finally:
+        await client.cleanup()
+
+async def demonstrate_advanced_features():
+    """演示高级特性"""
+    print("\n🎯 演示 6: 高级特性展示")
+    print("-" * 50)
+    
+    client = WorkflowHttpClient()
+    await client.initialize()
+    
+    try:
+        # 创建一个复杂的工作流，展示多种真实MCP工具的综合应用
+        advanced_workflow = {
+            "name": "高级特性演示工作流",
+            "description": "展示文件操作、数学运算、数据库操作、提示处理的综合应用",
+            "variables": {
+                "base_value": {"type": "float", "default": 100.0},
+                "multiplier": {"type": "float", "default": 1.5},
+                "data_source": {"type": "string", "default": "advanced_demo.txt"}
+            },
+            "steps": [
+                {
+                    "id": "create_source_file",
+                    "name": "创建源数据文件",
+                    "type": "function",
+                    "action": "write_file",
+                    "parameters": {
+                        "path": "{{data_source}}",
+                        "content": "Advanced workflow demo data: {{base_value}}"
+                    }
+                },
+                {
+                    "id": "perform_calculation",
+                    "name": "执行数学运算",
+                    "type": "function",
+                    "action": "multiply",
+                    "depends_on": ["create_source_file"],
+                    "parameters": {
+                        "a": "{{base_value}}",
+                        "b": "{{multiplier}}"
+                    }
+                },
+                {
+                    "id": "create_db_table",
+                    "name": "创建数据库表",
+                    "type": "function", 
+                    "action": "create_table",
+                    "depends_on": ["perform_calculation"],
+                    "parameters": {
+                        "table_name": "advanced_results"
+                    }
+                },
+                {
+                    "id": "insert_calculation_result",
+                    "name": "插入计算结果",
+                    "type": "function",
+                    "action": "insert_data", 
+                    "depends_on": ["create_db_table"],
+                    "parameters": {
+                        "table_name": "advanced_results",
+                        "data": {"name": "multiply_operation", "value": "calculation_result"}
+                    }
+                },
+                {
+                    "id": "format_summary",
+                    "name": "格式化摘要报告",
+                    "type": "function",
+                    "action": "format_prompt",
+                    "depends_on": ["insert_calculation_result"],
+                    "parameters": {
+                        "template": "高级工作流执行完成\\n基础值: {base}\\n乘数: {mult}\\n计算结果: {base} × {mult} = {result}\\n数据已保存到数据库",
+                        "variables": {
+                            "base": "{{base_value}}",
+                            "mult": "{{multiplier}}", 
+                            "result": "{{base_value}} × {{multiplier}}"
+                        }
+                    }
+                },
+                {
+                    "id": "save_final_report",
+                    "name": "保存最终报告",
+                    "type": "function",
+                    "action": "write_file",
+                    "depends_on": ["format_summary"],
+                    "parameters": {
+                        "path": "advanced_workflow_report.txt",
+                        "content": "高级工作流执行报告\\n执行时间: $(timestamp)\\n基础值: {{base_value}}\\n乘数: {{multiplier}}\\n所有操作已成功完成"
+                    }
+                },
+                {
+                    "id": "verify_results",
+                    "name": "验证执行结果",
+                    "type": "function",
+                    "action": "query_data",
+                    "depends_on": ["save_final_report"],
+                    "parameters": {
+                        "table_name": "advanced_results"
+                    }
+                }
+            ]
+        }
         
-        if self.engine.executions:
-            running_count = len([e for e in self.engine.executions.values() 
-                               if e.status == WorkflowStatus.RUNNING])
-            completed_count = len([e for e in self.engine.executions.values() 
-                                 if e.status == WorkflowStatus.COMPLETED])
-            print(f"   运行中: {running_count}")
-            print(f"   已完成: {completed_count}")
+        print(f"🔧 创建高级特性演示工作流...")
+        create_result = await client.create_workflow(advanced_workflow)
+        
+        if create_result["success"]:
+            workflow_id = create_result["workflow_id"]
+            print(f"✅ 高级工作流创建成功，ID: {workflow_id}")
+            
+            # 执行工作流
+            execution_variables = {
+                "base_value": 250.0,
+                "multiplier": 2.5,
+                "data_source": "advanced_demo_custom.txt"
+            }
+            
+            print(f"🚀 启动高级工作流执行...")
+            execute_result = await client.execute_workflow(workflow_id, execution_variables)
+            
+            if execute_result["success"]:
+                execution_id = execute_result["execution_id"]
+                print(f"⚡ 高级工作流开始执行，ID: {execution_id}")
+                
+                # 监控执行，观察所有步骤
+                await client.monitor_workflow_execution(execution_id, check_interval=2)
+                
+            else:
+                print(f"❌ 工作流执行失败: {execute_result.get('message', '未知错误')}")
+        else:
+            print(f"❌ 工作流创建失败: {create_result.get('message', '未知错误')}")
+            
+    except Exception as e:
+        print(f"❌ 演示过程发生错误: {e}")
+    finally:
+        await client.cleanup()
 
+async def interactive_workflow_builder():
+    """真正的交互式工作流构建器"""
+    print("\n🎮 交互式工作流构建器")
+    print("=" * 60)
+    print("欢迎使用真正的交互式工作流构建器！")
+    print("你可以逐步构建自己的自定义工作流。")
+    print("=" * 60)
+    
+    client = WorkflowHttpClient()
+    await client.initialize()
+    
+    # 可用的MCP工具和它们的参数
+    available_tools = {
+        "文件操作": {
+            "read_file": {"参数": ["path"], "描述": "读取文件内容"},
+            "write_file": {"参数": ["path", "content"], "描述": "写入文件"},
+            "list_files": {"参数": ["directory_path"], "描述": "列出目录文件"},
+            "delete_file": {"参数": ["path"], "描述": "删除文件"}
+        },
+        "数学运算": {
+            "add": {"参数": ["a", "b"], "描述": "加法运算"},
+            "subtract": {"参数": ["a", "b"], "描述": "减法运算"},
+            "multiply": {"参数": ["a", "b"], "描述": "乘法运算"},
+            "divide": {"参数": ["a", "b"], "描述": "除法运算"},
+            "power": {"参数": ["base", "exponent"], "描述": "幂运算"}
+        },
+        "数据库操作": {
+            "create_table": {"参数": ["table_name"], "描述": "创建数据表"},
+            "insert_data": {"参数": ["table_name", "data"], "描述": "插入数据"},
+            "query_data": {"参数": ["table_name", "query"], "描述": "查询数据"},
+            "update_data": {"参数": ["table_name", "data", "condition"], "描述": "更新数据"}
+        },
+        "提示处理": {
+            "format_prompt": {"参数": ["template", "variables"], "描述": "格式化提示模板"},
+            "process_text": {"参数": ["text", "operation"], "描述": "处理文本内容"}
+        }
+    }
+    
+    try:
+        # 步骤1：工作流基本信息
+        print("\n📝 步骤 1: 工作流基本信息")
+        print("-" * 40)
+        
+        workflow_name = input("请输入工作流名称: ").strip()
+        if not workflow_name:
+            workflow_name = "用户自定义工作流"
+            
+        workflow_description = input("请输入工作流描述: ").strip()
+        if not workflow_description:
+            workflow_description = "通过交互式构建器创建的工作流"
+        
+        # 步骤2：变量定义
+        print("\n🔧 步骤 2: 定义工作流变量")
+        print("-" * 40)
+        print("是否需要定义工作流变量？(y/n)")
+        
+        variables = {}
+        if input().strip().lower() in ['y', 'yes', '是']:
+            print("请逐个定义变量（输入空行结束）:")
+            while True:
+                var_name = input("变量名: ").strip()
+                if not var_name:
+                    break
+                    
+                var_type = input("变量类型 (string/int/float/bool): ").strip()
+                if var_type not in ['string', 'int', 'float', 'bool']:
+                    var_type = 'string'
+                    
+                var_default = input("默认值: ").strip()
+                
+                # 类型转换
+                if var_type == 'int' and var_default.isdigit():
+                    var_default = int(var_default)
+                elif var_type == 'float':
+                    try:
+                        var_default = float(var_default)
+                    except:
+                        var_default = 0.0
+                elif var_type == 'bool':
+                    var_default = var_default.lower() in ['true', 'yes', '1', '是']
+                
+                variables[var_name] = {"type": var_type, "default": var_default}
+                print(f"✅ 已添加变量: {var_name} ({var_type}) = {var_default}")
+        
+        # 步骤3：构建工作流步骤
+        print("\n⚙️ 步骤 3: 构建工作流步骤")
+        print("-" * 40)
+        print("现在开始添加工作流步骤...")
+        
+        steps = []
+        step_counter = 1
+        
+        while True:
+            print(f"\n--- 步骤 {step_counter} ---")
+            
+            # 显示可用工具
+            print("\n可用的工具类别:")
+            for i, category in enumerate(available_tools.keys(), 1):
+                print(f"  {i}. {category}")
+            
+            category_choice = input("选择工具类别 (输入数字，或输入 'done' 完成): ").strip()
+            
+            if category_choice.lower() == 'done':
+                break
+                
+            try:
+                category_idx = int(category_choice) - 1
+                category_name = list(available_tools.keys())[category_idx]
+                tools_in_category = available_tools[category_name]
+            except (ValueError, IndexError):
+                print("❌ 无效的选择，请重试")
+                continue
+            
+            # 显示该类别下的工具
+            print(f"\n{category_name} 中可用的工具:")
+            tool_list = list(tools_in_category.keys())
+            for i, tool_name in enumerate(tool_list, 1):
+                tool_info = tools_in_category[tool_name]
+                print(f"  {i}. {tool_name} - {tool_info['描述']}")
+                print(f"     参数: {', '.join(tool_info['参数'])}")
+            
+            tool_choice = input("选择工具 (输入数字): ").strip()
+            try:
+                tool_idx = int(tool_choice) - 1
+                selected_tool = tool_list[tool_idx]
+                tool_info = tools_in_category[selected_tool]
+            except (ValueError, IndexError):
+                print("❌ 无效的选择，请重试")
+                continue
+            
+            # 步骤详细信息
+            step_name = input(f"步骤名称 (默认: {tool_info['描述']}): ").strip()
+            if not step_name:
+                step_name = tool_info['描述']
+            
+            step_id = f"step_{step_counter}"
+            
+            # 参数设置
+            print(f"\n设置 {selected_tool} 的参数:")
+            parameters = {}
+            for param in tool_info['参数']:
+                param_value = input(f"  {param}: ").strip()
+                
+                # 支持变量引用
+                if param_value.startswith("{{") and param_value.endswith("}}"):
+                    parameters[param] = param_value
+                elif param in ['a', 'b', 'base', 'exponent'] and param_value.replace('.', '').replace('-', '').isdigit():
+                    # 数值参数
+                    if '.' in param_value:
+                        parameters[param] = float(param_value)
+                    else:
+                        parameters[param] = int(param_value)
+                elif param == 'data' and selected_tool == 'insert_data':
+                    # JSON数据
+                    try:
+                        parameters[param] = json.loads(param_value)
+                    except:
+                        parameters[param] = {"value": param_value}
+                else:
+                    parameters[param] = param_value
+            
+            # 依赖关系
+            dependencies = []
+            if steps:  # 如果已有步骤
+                print(f"\n设置依赖关系 (已有步骤: {[s['id'] for s in steps]})")
+                deps_input = input("依赖的步骤ID (多个用逗号分隔，留空表示无依赖): ").strip()
+                if deps_input:
+                    dependencies = [dep.strip() for dep in deps_input.split(',') if dep.strip()]
+            
+            # 创建步骤
+            step = {
+                "id": step_id,
+                "name": step_name,
+                "type": "function",
+                "action": selected_tool,
+                "parameters": parameters
+            }
+            
+            if dependencies:
+                step["depends_on"] = dependencies
+            
+            steps.append(step)
+            print(f"✅ 已添加步骤: {step_name}")
+            step_counter += 1
+            
+            # 询问是否继续
+            continue_adding = input("\n是否继续添加步骤？(y/n): ").strip().lower()
+            if continue_adding not in ['y', 'yes', '是']:
+                break
+        
+        if not steps:
+            print("❌ 没有添加任何步骤，无法创建工作流")
+            return
+        
+        # 步骤4：构建完整工作流定义
+        print("\n🔨 步骤 4: 生成工作流定义")
+        print("-" * 40)
+        
+        user_workflow = {
+            "name": workflow_name,
+            "description": workflow_description,
+            "steps": steps
+        }
+        
+        if variables:
+            user_workflow["variables"] = variables
+        
+        # 显示工作流摘要
+        print("\n📋 工作流摘要:")
+        print(f"  名称: {workflow_name}")
+        print(f"  描述: {workflow_description}")
+        print(f"  变量: {len(variables)} 个")
+        print(f"  步骤: {len(steps)} 个")
+        for step in steps:
+            deps_str = f" (依赖: {', '.join(step.get('depends_on', []))})" if step.get('depends_on') else ""
+            print(f"    - {step['name']} [{step['action']}]{deps_str}")
+        
+        # 步骤5：确认并创建
+        print(f"\n✅ 步骤 5: 创建和执行工作流")
+        print("-" * 40)
+        
+        confirm = input("确认创建此工作流？(y/n): ").strip().lower()
+        if confirm not in ['y', 'yes', '是']:
+            print("❌ 用户取消了工作流创建")
+            return
+        
+        print(f"🔧 正在创建工作流: {workflow_name}")
+        create_result = await client.create_workflow(user_workflow)
+        
+        if create_result["success"]:
+            workflow_id = create_result["workflow_id"]
+            print(f"✅ 工作流创建成功！ID: {workflow_id}")
+            
+            # 询问是否立即执行
+            execute_now = input("是否立即执行此工作流？(y/n): ").strip().lower()
+            if execute_now in ['y', 'yes', '是']:
+                
+                # 收集执行时变量值
+                execution_variables = {}
+                if variables:
+                    print("\n请提供执行时的变量值:")
+                    for var_name, var_info in variables.items():
+                        current_value = input(f"  {var_name} (默认: {var_info['default']}): ").strip()
+                        if current_value:
+                            # 类型转换
+                            if var_info['type'] == 'int':
+                                try:
+                                    execution_variables[var_name] = int(current_value)
+                                except:
+                                    execution_variables[var_name] = var_info['default']
+                            elif var_info['type'] == 'float':
+                                try:
+                                    execution_variables[var_name] = float(current_value)
+                                except:
+                                    execution_variables[var_name] = var_info['default']
+                            elif var_info['type'] == 'bool':
+                                execution_variables[var_name] = current_value.lower() in ['true', 'yes', '1', '是']
+                            else:
+                                execution_variables[var_name] = current_value
+                        else:
+                            execution_variables[var_name] = var_info['default']
+                
+                print(f"🚀 开始执行工作流...")
+                execute_result = await client.execute_workflow(workflow_id, execution_variables)
+                
+                if execute_result["success"]:
+                    execution_id = execute_result["execution_id"]
+                    print(f"⚡ 工作流开始执行，执行ID: {execution_id}")
+                    await client.monitor_workflow_execution(execution_id, check_interval=2)
+                else:
+                    print(f"❌ 执行失败: {execute_result.get('message', '未知错误')}")
+            else:
+                print(f"💾 工作流已保存，ID: {workflow_id}")
+                print("你可以稍后通过工作流管理功能执行它")
+        else:
+            print(f"❌ 工作流创建失败: {create_result.get('message', '未知错误')}")
+            
+    except KeyboardInterrupt:
+        print("\n⏹️ 用户中断了交互式构建过程")
+    except Exception as e:
+        print(f"❌ 交互式构建过程发生错误: {e}")
+    finally:
+        await client.cleanup()
 
-async def demo_workflow_engine():
-    """智能工作流引擎演示函数（供start.py调用）"""
-    demo = SmartWorkflowDemo()
-    await demo.run_demo()
-
+def print_challenge_summary():
+    """打印挑战总结"""
+    print("\n" + "=" * 80)
+    print("🎉 Challenge 8 完成总结")
+    print("=" * 80)
+    print()
+    print("恭喜！你已经完成了MCP系列的最终挑战！")
+    print()
+    print("🏆 你已经掌握的技能:")
+    print("  ✅ 复杂工作流的设计和实现")
+    print("  ✅ 多步骤任务协调和依赖管理")
+    print("  ✅ 并行任务执行和性能优化")
+    print("  ✅ 条件分支和循环控制逻辑")
+    print("  ✅ 智能错误处理和重试机制")
+    print("  ✅ 实时工作流状态监控")
+    print("  ✅ 工作流模板和继承系统")
+    print("  ✅ 变量管理和数据传递")
+    print("  ✅ 执行报告和性能分析")
+    print("  ✅ 事件驱动和触发器机制")
+    print()
+    print("🚀 应用场景:")
+    print("  • ETL数据处理管道")
+    print("  • 机器学习训练流程")
+    print("  • 微服务协调和编排")
+    print("  • DevOps CI/CD流程")
+    print("  • 业务流程自动化")
+    print("  • 数据科学实验管理")
+    print("  • 批处理任务调度")
+    print()
+    print("🎓 学习成果:")
+    print("  你现在已经完全掌握了Model Context Protocol的所有核心概念，")
+    print("  能够构建复杂的分布式系统和智能工作流引擎。")
+    print()
+    print("🔮 下一步:")
+    print("  • 探索更多MCP服务器的集成")
+    print("  • 构建你自己的业务特定工作流")
+    print("  • 贡献到MCP开源社区")
+    print("  • 将MCP集成到实际项目中")
+    print()
+    print("=" * 80)
+    print("感谢完成整个MCP学习之旅！🎊")
+    print("=" * 80)
 
 async def main():
-    """主函数"""
-    await demo_workflow_engine()
-
+    """主函数 - 运行完整的Challenge 8演示"""
+    
+    print_welcome()
+    
+    # 检查工作流 HTTP 服务器
+    if not await check_workflow_server():
+        print("❌ 服务器检查失败，退出演示")
+        return
+    
+    # 检查服务器连接
+    if not await check_server_connection():
+        print("❌ 服务器连接失败，退出演示")
+        return
+    
+    print("\n🎯 Challenge 8 将通过以下步骤展示工作流引擎的能力:")
+    print("  1. 工作流创建和验证")
+    print("  2. 工作流模板使用") 
+    print("  3. 工作流执行与监控")
+    print("  4. 错误处理和重试机制")
+    print("  5. 工作流管理和状态查询")
+    print("  6. 高级特性展示")
+    print("  7. 交互式工作流构建器")
+    
+    try:
+        # 运行所有演示
+        await demonstrate_workflow_creation()
+        await asyncio.sleep(2)
+        
+        await demonstrate_template_usage()
+        await asyncio.sleep(2)
+        
+        await demonstrate_workflow_execution()
+        await asyncio.sleep(2)
+        
+        await demonstrate_error_handling()
+        await asyncio.sleep(2)
+        
+        await demonstrate_workflow_management()
+        await asyncio.sleep(2)
+        
+        await demonstrate_advanced_features()
+        await asyncio.sleep(2)
+        
+        await interactive_workflow_builder()
+        
+        # 打印总结
+        print_challenge_summary()
+        
+    except KeyboardInterrupt:
+        print("\n⏹️ 用户中断了挑战")
+    except Exception as e:
+        print(f"\n❌ 挑战过程中发生错误: {e}")
 
 if __name__ == "__main__":
     asyncio.run(main())

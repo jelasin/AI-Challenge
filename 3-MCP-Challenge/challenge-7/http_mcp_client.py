@@ -131,8 +131,9 @@ class EnterpriseHttpDemo:
     
     def __init__(self, gateway_url: str = "http://localhost:8000"):
         self.gateway_url = gateway_url
-        self.workspace_dir = Path(__file__).parent / "workspace"
-        self.workspace_dir.mkdir(exist_ok=True)
+        # 指向 mcp_servers/workspace 目录
+        self.workspace_dir = Path(__file__).parent.parent / "mcp_servers" / "workspace"
+        self.workspace_dir.mkdir(parents=True, exist_ok=True)
     
     async def run_demo(self):
         """运行演示"""
