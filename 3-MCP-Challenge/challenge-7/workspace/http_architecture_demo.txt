@@ -1,0 +1,5 @@
+企业级 MCP HTTP 架构演示
+演示时间: 292587.4216967
+网关地址: http://localhost:8000
+工作空间: D:\DM\AI\AI-Challenge\3-MCP-Challenge\challenge-7\workspace
+架构类型: HTTP API 网关

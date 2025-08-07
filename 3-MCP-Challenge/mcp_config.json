@@ -1,0 +1,54 @@
+{
+  "mcpServers": {
+    "prompt-server": {
+      "command": "python",
+      "args": [
+        "mcp_servers/prompt_server.py"
+      ],
+      "env": {},
+      "description": "MCP 提示模板服务器，提供提示模板的创建、管理、发现和使用功能"
+    },
+    "file-server": {
+      "command": "python",
+      "args": [
+        "mcp_servers/file_server.py"
+      ],
+      "env": {},
+      "description": "文件操作 MCP 服务器，提供文件读写和目录管理功能"
+    },
+    "math-server": {
+      "command": "python",
+      "args": [
+        "mcp_servers/math_server.py"
+      ],
+      "env": {},
+      "description": "数学计算 MCP 服务器，提供基础数学运算功能"
+    },
+    "sqlite-server": {
+      "command": "python",
+      "args": [
+        "mcp_servers/sqlite_server.py"
+      ],
+      "env": {},
+      "description": "SQLite 数据库 MCP 服务器，专注于用户管理、任务管理和数据库操作功能"
+    },
+    "enterprise-gateway": {
+      "command": "python",
+      "args": [
+        "mcp_servers/enterprise_gateway.py"
+      ],
+      "env": {},
+      "description": "企业级 MCP 网关服务器，提供服务注册、负载均衡、认证、监控等企业级功能"
+    }
+  },
+  "clientConfig": {
+    "timeout": 30000,
+    "maxRetries": 3,
+    "logLevel": "info"
+  },
+  "description": "MCP Challenge 项目的服务器配置文件",
+  "version": "1.0.0",
+  "load_balancer": {
+    "strategy": "least_connections"
+  }
+}
