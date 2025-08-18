@@ -82,6 +82,8 @@
 
 ### 环境设置
 
+推荐使用Python 3.11及以上版本。
+
 ```bash
 # 安装依赖
 pip install -r requirements.txt
