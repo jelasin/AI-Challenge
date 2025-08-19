@@ -1,4 +1,5 @@
 .env
-.vnev
+.venv
+.vscode/
 test.py
 blog_article.md
