@@ -79,7 +79,9 @@ ResponseFormat = Literal["mp3", "opus", "aac", "flac", "wav", "pcm"]
 
 def tts_synthesize(text: str, voice: str, fmt: str, outdir: Path, basename: str) -> Path:
 	client_kwargs = {}
-	client_kwargs["base_url"] = os.getenv("OPENAI_API_BASE")
+	base_url = os.getenv("OPENAI_API_BASE")
+	if base_url:
+		client_kwargs["base_url"] = base_url
 	client = OpenAI(**client_kwargs)
 
 	outdir.mkdir(parents=True, exist_ok=True)

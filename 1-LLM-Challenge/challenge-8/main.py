@@ -66,7 +66,9 @@ def transcribe(file_path: str, model: Optional[str] = None, language: Optional[s
 	model_name = model or os.getenv("OPENAI_TRANSCRIBE_MODEL", "whisper-1")
 	# 允许通过 OPENAI_BASE_URL 指定自定义网关
 	client_kwargs = {}
-	client_kwargs["base_url"] = os.getenv("OPENAI_API_BASE")
+	base_url = os.getenv("OPENAI_API_BASE")
+	if base_url:
+		client_kwargs["base_url"] = base_url
 	client = OpenAI(**client_kwargs)
 	with open(file_path, "rb") as f:
 		if language:
