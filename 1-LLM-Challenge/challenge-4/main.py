@@ -12,39 +12,36 @@ Challenge 4: 文档处理和RAG（检索增强生成）v0.3
 
 任务描述：
 创建一个智能文档问答系统，能够：
-1. 处理多种格式的文档（PDF、TXT、Markdown、CSV等）
+1. 处理多种格式的文档（TXT、Markdown、CSV等）
 2. 使用多种文本切分策略
 3. 构建向量数据库
 4. 实现智能检索
 5. 结合LLM生成准确答案
+6. 记录历史对话
 """
 
 from langchain_openai import OpenAIEmbeddings
 from langchain.chat_models import init_chat_model
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.documents import Document
-from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
 from langchain_community.document_loaders import (
     TextLoader,
     PyPDFLoader,
     CSVLoader,
-    UnstructuredMarkdownLoader,
     DirectoryLoader,
 )
 from langchain_text_splitters import (
     RecursiveCharacterTextSplitter,
-    CharacterTextSplitter,
     MarkdownHeaderTextSplitter,
     TokenTextSplitter
 )
 from langchain_community.vectorstores import FAISS
-from langchain_core.retrievers import BaseRetriever
 from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any
+from typing import List,  Dict
 import os
-import json
 from pathlib import Path
+from operator import itemgetter
 
 class DocumentAnalysis(BaseModel):
     """文档分析结果"""
@@ -85,30 +82,13 @@ def load_documents_from_dir(doc_dir: str) -> list[Document]:
         try:
             docs = loader.load()
         except Exception as e:
-            # 某些 loader 可能因依赖缺失失败（如 pypdf），跳过并提示
+            # 某些 loader 可能因依赖缺失失败，跳过并提示
             print(f"⚠️ 加载 {dtype} 文档时出错: {e}")
             docs = []
         for d in docs:
             d.metadata["source"] = os.path.relpath(d.metadata.get("source", d.metadata.get("file_path", "")), doc_dir) if d.metadata else ""
             d.metadata["type"] = dtype
         documents.extend(docs)
-
-    # 单独处理 PDF（逐文件调用 PyPDFLoader）
-    try:
-        for pdf_path in Path(doc_dir).rglob("*.pdf"):
-            try:
-                pdf_docs = PyPDFLoader(str(pdf_path)).load()
-            except Exception as e:
-                print(f"⚠️ 加载 pdf 文档 {pdf_path} 时出错: {e}")
-                pdf_docs = []
-            for d in pdf_docs:
-                if d.metadata is None:
-                    d.metadata = {}
-                d.metadata["source"] = os.path.relpath(str(pdf_path), doc_dir)
-                d.metadata["type"] = "pdf"
-            documents.extend(pdf_docs)
-    except Exception as e:
-        print(f"⚠️ 扫描 PDF 文件时出错: {e}")
 
     print(f"✅ 共加载文档 {len(documents)} 条")
     return documents
@@ -211,20 +191,26 @@ def create_rag_system(doc_dir: str):
     
     # 创建RAG Prompt
     rag_prompt = ChatPromptTemplate.from_template("""
-你是一个专业的AI助手，请基于以下上下文信息回答用户的问题。
+你是一个专业的AI助手。请综合“最近对话历史”和“检索到的上下文”来回答当前用户问题；若上下文不包含相关信息，请明确说明无法从提供的文档中找到答案。
+
+最近对话历史（最多5轮，若为空可忽略）：
+{chat_history}
 
 上下文信息：
 {context}
 
 用户问题：{question}
 
-请根据上下文信息提供准确、详细的答案。如果上下文中没有相关信息，请说明无法从提供的文档中找到答案。
-
 回答：""")
     
     # 创建RAG链
+    # 链输入：{"question": str, "chat_history": str}
     rag_chain = (
-        {"context": retriever | format_documents, "question": RunnablePassthrough()}
+        {
+            "context": itemgetter("question") | retriever | format_documents,
+            "question": itemgetter("question"),
+            "chat_history": itemgetter("chat_history"),
+        }
         | rag_prompt
         | llm
         | StrOutputParser()
@@ -312,6 +298,7 @@ def main():
         print("   - 输入 exit / quit / q 或直接回车可退出。")
 
         # 交互式问答循环
+        history: list[tuple[str, str]] = []  # 记录最近 5 轮 (question, answer)
         while True:
             try:
                 question = input("\n❓ 你的问题: ").strip()
@@ -324,8 +311,15 @@ def main():
                 break
 
             print("-" * 40)
-            # 获取答案
-            answer = rag_chain.invoke(question)
+            # 组装最近 5 轮对话历史
+            if history:
+                history_text = "\n".join([f"用户：{q}\n助手：{a}" for q, a in history[-5:]])
+            else:
+                history_text = "（无）"
+
+            # 获取答案（传入问题与历史）
+            payload = {"question": question, "chat_history": history_text}
+            answer = rag_chain.invoke(payload)
             print(f"🤖 回答: {answer}")
 
             # 显示相关文档
@@ -334,6 +328,11 @@ def main():
             for j, doc in enumerate(relevant_docs, 1):
                 print(f"   {j}. 来源: {doc.metadata.get('source', '未知')}")
                 print(f"      内容: {doc.page_content[:150]}...")
+
+            # 更新对话历史，最多保留 5 轮
+            history.append((question, answer))
+            if len(history) > 5:
+                history = history[-5:]
 
     except Exception as e:
         print(f"❌ 错误: {e}")
