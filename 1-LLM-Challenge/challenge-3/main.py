@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Challenge 3: 高级 Prompt & Few-shot（基于 LangChain 0.3）
+Challenge 3: 高级 Prompt & Few-shot v0.3
 
 变更要点：
 - 使用 LangChain 0.3 的 LCEL 可组合链写法与 structured_output
@@ -17,7 +17,8 @@ from typing import List
 
 from pydantic import BaseModel, Field
 
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_openai import OpenAIEmbeddings
+from langchain.chat_models import init_chat_model
 from langchain_core.prompts import ChatPromptTemplate, FewShotPromptTemplate, PromptTemplate
 from langchain_core.runnables import RunnableLambda, RunnableMap
 from langchain_core.output_parsers import StrOutputParser
@@ -183,7 +184,7 @@ def build_chain():
             "只返回 JSON，字段 language(语言名) 与 confidence(1-100)。\n代码：\n```\n{code}\n```",
         ),
     ])
-    lang_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+    lang_llm = init_chat_model("gpt-4o-mini", temperature=0)
     lang_detector = lang_prompt | lang_llm.with_structured_output(LanguageGuess)
 
     # Few-shot（动态示例选择）
@@ -214,7 +215,7 @@ def build_chain():
         ]
     )
 
-    review_llm = ChatOpenAI(model="gpt-4o", temperature=0.1)
+    review_llm = init_chat_model("gpt-4o", temperature=0.1)
 
     # 组合链（LCEL）
     # 1) 提取 code 并识别语言
@@ -282,7 +283,7 @@ def main():
             "只返回 JSON，字段 language 与 confidence。\n代码：\n```\n{code}\n```",
         ),
     ])
-    lang_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+    lang_llm = init_chat_model("gpt-4o-mini", temperature=0)
     lang_detector = lang_prompt | lang_llm.with_structured_output(LanguageGuess)
     try:
         guess_raw = lang_detector.invoke({"code": code})

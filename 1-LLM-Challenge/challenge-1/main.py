@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-Challenge 1: LangChain v0.3 风格的基础翻译器（LCEL + Streaming + 可选结构化输出）
+Challenge 1: 基础翻译器（LCEL + Streaming + 可选结构化输出）v0.3
 
 要点（v0.3 推荐范式）：
 - 使用 ChatPromptTemplate 组织消息（system/human）

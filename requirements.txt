@@ -19,3 +19,6 @@ pydantic
 langgraph[all]
 aiosqlite
 fastapi
+websockets
+sounddevice
+numpy

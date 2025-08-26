@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-Challenge 2: LangChain 工具调用系统（v0.3 + 交互式）
+Challenge 2: LangChain 工具调用系统 v0.3
 =================================================
 
 要点（v0.3 推荐特性）：

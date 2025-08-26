@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Challenge 4: 文档处理和RAG（检索增强生成）
+Challenge 4: 文档处理和RAG（检索增强生成）v0.3
 难度：中级到高级
 
 学习目标：
@@ -19,7 +19,8 @@ Challenge 4: 文档处理和RAG（检索增强生成）
 5. 结合LLM生成准确答案
 """
 
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_openai import OpenAIEmbeddings
+from langchain.chat_models import init_chat_model
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.documents import Document
 from langchain_core.runnables import RunnablePassthrough
@@ -205,11 +206,8 @@ def create_rag_system(doc_dir: str):
         search_kwargs={"k": 4}  # 检索最相似的4个块
     )
     
-    # 创建LLM
-    llm = ChatOpenAI(
-        model="gpt-4o",
-        temperature=0.1
-    )
+    # 创建LLM（v0.3 推荐：init_chat_model）
+    llm = init_chat_model("gpt-4o", temperature=0.1)
     
     # 创建RAG Prompt
     rag_prompt = ChatPromptTemplate.from_template("""
