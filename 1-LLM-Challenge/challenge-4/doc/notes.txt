@@ -1,0 +1,6 @@
+This is a plain text note file.
+
+- It contains some bullet points.
+- About AI, Python and Data Science.
+
+The goal is to have a variety of formats for RAG demo.

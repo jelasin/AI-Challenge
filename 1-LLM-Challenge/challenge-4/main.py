@@ -25,11 +25,11 @@ from langchain_core.documents import Document
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
 from langchain_community.document_loaders import (
-    TextLoader, 
+    TextLoader,
     PyPDFLoader,
     CSVLoader,
     UnstructuredMarkdownLoader,
-    DirectoryLoader
+    DirectoryLoader,
 )
 from langchain_text_splitters import (
     RecursiveCharacterTextSplitter,
@@ -42,8 +42,8 @@ from langchain_core.retrievers import BaseRetriever
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 import os
-import tempfile
 import json
+from pathlib import Path
 
 class DocumentAnalysis(BaseModel):
     """文档分析结果"""
@@ -60,198 +60,57 @@ class QAResult(BaseModel):
     sources: List[str] = Field(description="来源文档")
     relevant_chunks: List[str] = Field(description="相关文档块")
 
-def create_sample_documents():
-    """创建示例文档用于测试"""
-    docs = []
-    
-    # 创建AI相关文档
-    ai_doc = """
-    # 人工智能基础
+def load_documents_from_dir(doc_dir: str) -> list[Document]:
+    """从指定目录加载多种格式文档（md/txt/csv/pdf）。"""
+    print(f"📂 从目录加载文档: {doc_dir}")
+    documents: list[Document] = []
 
-    ## 机器学习
-    机器学习是人工智能的一个子领域，它使计算机能够在没有明确编程的情况下学习和改进。
-    机器学习算法通过训练数据建立数学模型，以便对新数据进行预测或决策。
+    # Markdown 与 TXT
+    md_loader = DirectoryLoader(
+        doc_dir, glob="**/*.md", loader_cls=TextLoader, loader_kwargs={"encoding": "utf-8"}
+    )
+    txt_loader = DirectoryLoader(
+        doc_dir, glob="**/*.txt", loader_cls=TextLoader, loader_kwargs={"encoding": "utf-8"}
+    )
+    # CSV（每行一条 Document）
+    csv_loader = DirectoryLoader(
+        doc_dir, glob="**/*.csv", loader_cls=CSVLoader, loader_kwargs={"encoding": "utf-8"}
+    )
+    for loader, dtype in (
+        (md_loader, "markdown"),
+        (txt_loader, "text"),
+        (csv_loader, "csv"),
+    ):
+        try:
+            docs = loader.load()
+        except Exception as e:
+            # 某些 loader 可能因依赖缺失失败（如 pypdf），跳过并提示
+            print(f"⚠️ 加载 {dtype} 文档时出错: {e}")
+            docs = []
+        for d in docs:
+            d.metadata["source"] = os.path.relpath(d.metadata.get("source", d.metadata.get("file_path", "")), doc_dir) if d.metadata else ""
+            d.metadata["type"] = dtype
+        documents.extend(docs)
 
-    ### 监督学习
-    监督学习使用标记的训练数据来学习从输入到输出的映射函数。
-    常见的监督学习算法包括：
-    - 线性回归
-    - 逻辑回归  
-    - 决策树
-    - 随机森林
-    - 支持向量机
+    # 单独处理 PDF（逐文件调用 PyPDFLoader）
+    try:
+        for pdf_path in Path(doc_dir).rglob("*.pdf"):
+            try:
+                pdf_docs = PyPDFLoader(str(pdf_path)).load()
+            except Exception as e:
+                print(f"⚠️ 加载 pdf 文档 {pdf_path} 时出错: {e}")
+                pdf_docs = []
+            for d in pdf_docs:
+                if d.metadata is None:
+                    d.metadata = {}
+                d.metadata["source"] = os.path.relpath(str(pdf_path), doc_dir)
+                d.metadata["type"] = "pdf"
+            documents.extend(pdf_docs)
+    except Exception as e:
+        print(f"⚠️ 扫描 PDF 文件时出错: {e}")
 
-    ### 无监督学习
-    无监督学习从未标记的数据中发现隐藏的模式或结构。
-    主要类型包括：
-    - 聚类分析
-    - 降维
-    - 关联规则学习
-
-    ## 深度学习
-    深度学习是机器学习的一个子集，使用神经网络来模拟人脑处理信息的方式。
-    深度学习在图像识别、自然语言处理和语音识别等领域取得了突破性进展。
-
-    ### 神经网络架构
-    - 卷积神经网络（CNN）：主要用于图像处理
-    - 循环神经网络（RNN）：适合序列数据
-    - 长短期记忆网络（LSTM）：解决RNN的长期依赖问题
-    - Transformer：革命性的注意力机制架构
-    """
-    
-    # 创建编程相关文档
-    programming_doc = """
-    # Python编程指南
-
-    ## 基础语法
-    Python是一种高级、解释型的编程语言，以其简洁的语法和强大的功能而闻名。
-
-    ### 变量和数据类型
-    Python中的基本数据类型包括：
-    - 整数（int）
-    - 浮点数（float）
-    - 字符串（str）
-    - 布尔值（bool）
-    - 列表（list）
-    - 字典（dict）
-
-    ### 控制结构
-    Python提供了多种控制程序流程的结构：
-
-    #### 条件语句
-    ```python
-    if condition:
-        # 执行代码
-    elif another_condition:
-        # 执行其他代码
-    else:
-        # 默认执行
-    ```
-
-    #### 循环语句
-    ```python
-    # for循环
-    for item in iterable:
-        # 处理每个元素
-
-    # while循环  
-    while condition:
-        # 重复执行
-    ```
-
-    ## 面向对象编程
-    Python支持面向对象编程范式，允许创建类和对象。
-
-    ### 类的定义
-    ```python
-    class MyClass:
-        def __init__(self, value):
-            self.value = value
-        
-        def method(self):
-            return self.value * 2
-    ```
-
-    ## 常用库
-    Python有丰富的标准库和第三方库：
-    - NumPy：科学计算
-    - Pandas：数据分析
-    - Matplotlib：数据可视化
-    - Requests：HTTP请求
-    - Django：Web框架
-    - Flask：轻量级Web框架
-    """
-    
-    # 创建数据科学文档
-    datascience_doc = """
-    # 数据科学入门
-
-    ## 什么是数据科学
-    数据科学是一个跨学科领域，使用科学方法、过程、算法和系统从结构化和非结构化数据中提取知识和洞察。
-
-    ## 数据科学流程
-    典型的数据科学项目包括以下步骤：
-
-    ### 1. 问题定义
-    - 明确业务目标
-    - 定义成功指标
-    - 确定数据需求
-
-    ### 2. 数据收集
-    数据可能来自多个来源：
-    - 数据库
-    - API接口
-    - 文件系统
-    - 网页抓取
-    - 传感器数据
-
-    ### 3. 数据探索和清理
-    - 数据质量检查
-    - 处理缺失值
-    - 异常值检测
-    - 数据类型转换
-    - 特征工程
-
-    ### 4. 建模和分析
-    - 选择合适的算法
-    - 训练模型
-    - 模型验证
-    - 超参数调优
-
-    ### 5. 结果展示
-    - 数据可视化
-    - 报告编写
-    - 模型部署
-    - 监控维护
-
-    ## 常用工具
-    - Python/R：编程语言
-    - Jupyter Notebook：交互式环境
-    - Pandas：数据处理
-    - Scikit-learn：机器学习
-    - TensorFlow/PyTorch：深度学习
-    - Tableau/PowerBI：可视化工具
-    """
-    
-    return [
-        ("ai_basics.md", ai_doc),
-        ("python_guide.md", programming_doc),
-        ("data_science.md", datascience_doc)
-    ]
-
-def create_document_loaders():
-    """创建多种文档加载器"""
-    print("📁 创建示例文档...")
-    
-    # 创建临时目录和文件
-    temp_dir = tempfile.mkdtemp()
-    print(f"临时目录: {temp_dir}")
-    
-    # 创建示例文档
-    sample_docs = create_sample_documents()
-    file_paths = []
-    
-    for filename, content in sample_docs:
-        file_path = os.path.join(temp_dir, filename)
-        with open(file_path, 'w', encoding='utf-8') as f:
-            f.write(content)
-        file_paths.append(file_path)
-        print(f"创建文件: {filename}")
-    
-    # 创建CSV示例
-    csv_content = """name,age,occupation,description
-Alice,25,Data Scientist,专门从事机器学习和数据分析
-Bob,30,Software Engineer,专注于Python和Web开发
-Carol,28,Product Manager,负责AI产品的规划和管理
-David,32,Research Scientist,在深度学习领域有丰富经验"""
-    
-    csv_path = os.path.join(temp_dir, "team.csv")
-    with open(csv_path, 'w', encoding='utf-8') as f:
-        f.write(csv_content)
-    file_paths.append(csv_path)
-    print("创建文件: team.csv")
-    
-    return temp_dir, file_paths
+    print(f"✅ 共加载文档 {len(documents)} 条")
+    return documents
 
 def demo_text_splitters(documents: List[Document]):
     """演示不同的文本分割策略"""
@@ -270,7 +129,8 @@ def demo_text_splitters(documents: List[Document]):
     )
     recursive_chunks = recursive_splitter.split_text(full_text)
     print(f"   生成块数: {len(recursive_chunks)}")
-    print(f"   第一块长度: {len(recursive_chunks[0])}")
+    if recursive_chunks:
+        print(f"   第一块长度: {len(recursive_chunks[0])}")
     
     # 2. Markdown头部分割器
     print("\n2. Markdown头部分割器:")
@@ -297,42 +157,23 @@ def demo_text_splitters(documents: List[Document]):
     )
     token_chunks = token_splitter.split_text(full_text)
     print(f"   生成块数: {len(token_chunks)}")
-    print(f"   第一块长度: {len(token_chunks[0])}")
+    if token_chunks:
+        print(f"   第一块长度: {len(token_chunks[0])}")
     
     return recursive_chunks
 
-def create_rag_system():
-    """创建RAG系统"""
+def create_rag_system(doc_dir: str):
+    """创建RAG系统，基于本地 doc 目录构建索引与检索。"""
     # 检查API密钥
     if not os.getenv("OPENAI_API_KEY"):
         raise ValueError("请设置 OPENAI_API_KEY 环境变量")
-    
+
     print("\n🔧 构建RAG系统...")
-    
-    # 创建示例文档
-    temp_dir, file_paths = create_document_loaders()
-    
-    # 加载所有文档
-    documents = []
-    
-    # 加载Markdown文件
-    for file_path in file_paths:
-        if file_path.endswith('.md'):
-            loader = TextLoader(file_path, encoding='utf-8')
-            docs = loader.load()
-            for doc in docs:
-                doc.metadata['source'] = os.path.basename(file_path)
-                doc.metadata['type'] = 'markdown'
-            documents.extend(docs)
-        elif file_path.endswith('.csv'):
-            loader = CSVLoader(file_path, encoding='utf-8')
-            docs = loader.load()
-            for doc in docs:
-                doc.metadata['source'] = os.path.basename(file_path)
-                doc.metadata['type'] = 'csv'
-            documents.extend(docs)
-    
-    print(f"✅ 加载了 {len(documents)} 个文档")
+
+    # 从目录加载文档
+    documents = load_documents_from_dir(doc_dir)
+    if not documents:
+        raise ValueError(f"在目录 {doc_dir} 下未发现可加载的文档（支持 md/txt/csv/pdf）。")
     
     # 演示文本分割
     chunks = demo_text_splitters(documents)
@@ -390,8 +231,7 @@ def create_rag_system():
         | llm
         | StrOutputParser()
     )
-    
-    return rag_chain, retriever, vectorstore, len(split_documents)
+    return rag_chain, retriever, vectorstore, len(split_documents), documents
 
 def format_documents(docs):
     """格式化检索到的文档"""
@@ -457,63 +297,46 @@ def main():
     try:
         print("🔍 LangChain Challenge 4: 文档处理和RAG")
         print("=" * 60)
-        
+        # 文档目录（相对当前文件）
+        docs_dir = str(Path(__file__).parent.joinpath("doc").resolve())
+
         # 创建RAG系统
-        rag_chain, retriever, vectorstore, chunks_count = create_rag_system()
-        
-        # 分析文档集合（这里我们需要重新加载documents来分析）
-        temp_dir, file_paths = create_document_loaders()
-        documents = []
-        for file_path in file_paths:
-            if file_path.endswith('.md'):
-                loader = TextLoader(file_path, encoding='utf-8')
-                documents.extend(loader.load())
-        
+        rag_chain, retriever, vectorstore, chunks_count, documents = create_rag_system(docs_dir)
+
+        # 分析文档集合
         analyze_document_collection(documents, chunks_count)
-        
+
         # 演示高级检索
         demo_advanced_retrieval(retriever, vectorstore)
-        
+
         print("\n" + "=" * 60)
-        print("💬 开始问答演示...")
-        
-        # 测试问题
-        test_questions = [
-            "什么是机器学习？它有哪些主要类型？",
-            "Python中有哪些基本的数据类型？",
-            "数据科学的典型流程是什么？",
-            "深度学习和传统机器学习有什么区别？",
-            "团队中有哪些成员？他们的职业是什么？"
-        ]
-        
-        for i, question in enumerate(test_questions, 1):
-            print(f"\n❓ 问题 {i}: {question}")
+        print("💬 交互问答模式（输入内容后回车）：")
+        print("   - 输入 exit / quit / q 或直接回车可退出。")
+
+        # 交互式问答循环
+        while True:
+            try:
+                question = input("\n❓ 你的问题: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print("\n👋 退出。")
+                break
+
+            if not question or question.lower() in {"exit", "quit", "q"}:
+                print("👋 已退出问答模式。")
+                break
+
             print("-" * 40)
-            
             # 获取答案
             answer = rag_chain.invoke(question)
             print(f"🤖 回答: {answer}")
-            
+
             # 显示相关文档
             relevant_docs = retriever.invoke(question)
             print(f"\n📖 相关文档块 ({len(relevant_docs)} 个):")
             for j, doc in enumerate(relevant_docs, 1):
                 print(f"   {j}. 来源: {doc.metadata.get('source', '未知')}")
                 print(f"      内容: {doc.page_content[:150]}...")
-            
-            if i < len(test_questions):  # 不是最后一个问题
-                print()
-        
-        print("\n" + "=" * 60)
-        print("🎯 练习任务:")
-        print("1. 实现多种文档格式的加载器（PDF、Word、Excel等）")
-        print("2. 添加文档元数据增强（时间戳、作者、标签等）")
-        print("3. 实现混合检索（BM25 + 向量检索）")
-        print("4. 添加检索结果重排序功能")
-        print("5. 实现文档更新和增量索引")
-        print("6. 添加查询扩展和意图理解")
-        print("7. 实现多轮对话的上下文管理")
-        
+
     except Exception as e:
         print(f"❌ 错误: {e}")
         print("\n请确保:")

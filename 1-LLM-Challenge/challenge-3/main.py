@@ -1,408 +1,325 @@
 # -*- coding: utf-8 -*-
 """
-Challenge 3: 高级Prompt Template和Few-shot Learning
-难度：中级
+Challenge 3: 高级 Prompt & Few-shot（基于 LangChain 0.3）
 
-学习目标：
-1. 掌握复杂的PromptTemplate使用
-2. 实现Few-shot Learning
-3. 使用Example Selector
-4. 实现动态Prompt组合
-5. 学习部分格式化（Partial Formatting）
-
-任务描述：
-创建一个智能代码评审助手，能够：
-1. 根据编程语言动态选择评审规则
-2. 使用Few-shot learning提供评审示例
-3. 根据代码长度和复杂度选择合适的评审模板
-4. 支持多种输出格式（简洁/详细）
+变更要点：
+- 使用 LangChain 0.3 的 LCEL 可组合链写法与 structured_output
+- 通过 `-f` 选项只指定代码文件，由 LLM 自动识别语言
+- 取消内置 test_code，不再内置示例运行
 """
 
-from langchain_openai import ChatOpenAI
-from langchain_core.prompts import (
-    PromptTemplate, 
-    FewShotPromptTemplate, 
-    ChatPromptTemplate,
-    MessagesPlaceholder
-)
-from langchain_core.example_selectors import LengthBasedExampleSelector
-from langchain.prompts.example_selector import SemanticSimilarityExampleSelector
-from langchain_openai import OpenAIEmbeddings
-from langchain_community.vectorstores import FAISS
-from pydantic import BaseModel, Field
-from typing import List, Optional
+from __future__ import annotations
+
+import argparse
 import os
+from operator import itemgetter
+from typing import List
+
+from pydantic import BaseModel, Field
+
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_core.prompts import ChatPromptTemplate, FewShotPromptTemplate, PromptTemplate
+from langchain_core.runnables import RunnableLambda, RunnableMap
+from langchain_core.output_parsers import StrOutputParser
+from langchain.prompts.example_selector import SemanticSimilarityExampleSelector
+from langchain_community.vectorstores import FAISS
+
+
+# ---------------------------
+# 数据模型（structured output）
+# ---------------------------
+class LanguageGuess(BaseModel):
+    language: str = Field(description="识别到的主要编程语言")
+    confidence: int = Field(ge=1, le=100, description="置信度 1-100")
+
 
 class CodeReviewResult(BaseModel):
-    """代码评审结果模型"""
     overall_rating: int = Field(description="代码整体评分（1-10）", ge=1, le=10)
     issues: List[str] = Field(description="发现的问题列表")
     suggestions: List[str] = Field(description="改进建议列表")
     strengths: List[str] = Field(description="代码优点列表")
     summary: str = Field(description="评审总结")
 
-def create_code_review_assistant():
-    """创建代码评审助手"""
-    
-    # 检查API密钥
-    if not os.getenv("OPENAI_API_KEY"):
-        raise ValueError("请设置 OPENAI_API_KEY 环境变量")
-    
-    # 初始化模型
-    llm = ChatOpenAI(
-        model="gpt-4o",
-        temperature=0.1,  # 保持一致性，但允许少量创造性
-        streaming=False
-    ).with_structured_output(CodeReviewResult)
-    
-    # Few-shot学习示例
-    examples = [
-        {
-            "language": "python",
-            "code": "def calculate_average(numbers): return sum(numbers) / len(numbers)",
-            "review": "评分6分，问题是没有处理空列表情况，建议添加边界检查"
-        },
-        {
-            "language": "java",
-            "code": "public class Calculator public static int add int a int b return a plus b",
-            "review": "评分7分，代码简洁，建议添加文档注释和溢出处理"
-        }
-    ]
-    
-    # 定义示例模板
-    example_prompt = PromptTemplate(
-        input_variables=["language", "code", "review"],
-        template="编程语言: {language}\n代码: {code}\n评审: {review}"
-    )
-    
-    # 创建基于长度的示例选择器
-    example_selector = LengthBasedExampleSelector(
-        examples=examples,
-        example_prompt=example_prompt,
-        max_length=1500,  # 控制prompt长度
-    )
-    
-    # TODO: 实现基于语义相似度的示例选择器
-    # 提示：使用SemanticSimilarityExampleSelector和OpenAIEmbeddings
-    
-    # 创建Few-shot prompt模板
-    few_shot_prompt = FewShotPromptTemplate(
-        examples=examples,
-        example_prompt=example_prompt,
-        prefix="你是一个专业的代码评审专家。以下是一些代码评审示例:\n",
-        suffix="\n现在请评审以下代码:\n编程语言: {language}\n代码: {code}\n\n请提供结构化的评审结果:",
-        input_variables=["language", "code"]
-    )
-    
-    # TODO: 实现动态模板选择
-    # 根据代码长度和复杂度选择不同的评审模板
-    
-    return llm, few_shot_prompt
 
-def create_semantic_example_selector():
+# ---------------------------
+# 规则/工具函数
+# ---------------------------
+def rules_for_language(lang: str) -> str:
+    l = (lang or "").strip().lower()
+    common = (
+        "通用: 可读性、健壮性、边界条件、错误处理、日志、注释、测试、性能与安全最佳实践。"
+    )
+    mapping = {
+        "python": "Python: PEP8、类型提示、异常处理、迭代器/生成器、列表推导、上下文管理、GIL/并发。",
+        "java": "Java: OOP 设计、异常规范、线程安全、集合与流 API、内存与GC、注解与文档。",
+        "javascript": "JavaScript: 异步/Promise、错误处理、ES 模块、原型链与作用域、XSS/CSRF。",
+        "typescript": "TypeScript: 类型完整性、泛型、严格模式、接口/类型、枚举、Union/Never。",
+        "c#": "C#: 异步/await、LINQ、内存/Span、异常与日志、Nullable、依赖注入。",
+        "c++": "C/C++: RAII、内存管理、异常安全、拷贝/移动语义、并发、UB 风险。",
+        "c/c++": "C/C++: RAII、内存管理、异常安全、拷贝/移动语义、并发、UB 风险。",
+        "go": "Go: 错误处理、并发 goroutine/context、接口与切片、逃逸分析、包结构。",
+        "rust": "Rust: 所有权与借用、生命周期、Result/Option、并发/Send/Sync、unsafe 审慎使用。",
+        "php": "PHP: 类型声明、输入校验、错误级别、依赖管理、模板注入、防注入。",
+        "ruby": "Ruby: 可读 DSL、块/Proc、异常处理、元编程约束、Rails 约定。",
+        "shell": "Shell: set -euo pipefail、安全引用、可移植性、外部命令错误处理。",
+        "sql": "SQL: 索引与执行计划、事务与隔离级别、注入防护、分页与聚合性能。",
+        "javascript": "JavaScript: 异步/Promise、错误处理、模块化、XSS/CSRF。",
+    }
+    return mapping.get(l, common + " 若语言未知则从语法与上下文推断。")
+
+
+def calc_mode_by_length(code: str) -> str:
+    """根据代码长度选择输出模式（简洁/详细）。"""
+    lines = len(code.splitlines())
+    return "简洁" if lines > 200 else "详细"
+
+
+def load_code(path: str) -> str:
+    """尽力读取文件（尝试 utf-8 / gbk / latin-1）。"""
+    for enc in ("utf-8", "gbk", "latin-1"):
+        try:
+            with open(path, "r", encoding=enc) as f:
+                return f.read()
+        except Exception:
+            continue
+    raise ValueError(f"无法读取文件: {path}")
+
+
+# typed helpers for LCEL lambdas
+def _escape_braces(text: str) -> str:
     """
-    创建基于语义相似度的示例选择器
-    
-    任务：
-    1. 使用OpenAIEmbeddings创建嵌入
-    2. 使用FAISS作为向量存储
-    3. 创建SemanticSimilarityExampleSelector
-    4. 设置k=2（选择最相似的2个示例）
+    将花括号转义为用于 f-string 模板的安全形式。
     """
-    # 示例数据
+    return text.replace("{", "{{").replace("}", "}}")
+
+
+def _get_language_from_guess(guess: object) -> str:
+    if hasattr(guess, "language"):
+        try:
+            return str(getattr(guess, "language"))
+        except Exception:
+            pass
+    if isinstance(guess, dict):  # type: ignore[reportGeneralTypeIssues]
+        return str(guess.get("language", ""))
+    return ""
+
+
+def _step_rules(x: dict) -> dict:
+    code = str(x.get("code", ""))
+    language = str(x.get("language", ""))
+    return {**x, "rules": rules_for_language(language), "mode": calc_mode_by_length(code)}
+
+
+def _promptvalue_to_str(x: object) -> str:
+    """将 PromptValue/消息安全转换为字符串，用于插入到模板变量中。"""
+    try:
+        if hasattr(x, "to_string") and callable(getattr(x, "to_string")):
+            return str(getattr(x, "to_string")())
+        if hasattr(x, "text"):
+            return str(getattr(x, "text"))
+        return str(x)
+    except Exception:
+        return str(x)
+
+
+# ---------------------------
+# 构建 Few-shot 示例选择器（语义相似度）
+# ---------------------------
+def build_example_selector():
     examples = [
         {
             "language": "python",
-            "code": "def calculate_average(numbers): return sum(numbers) / len(numbers)",
-            "review": "评分6分，问题是没有处理空列表情况，建议添加边界检查"
+            "code": "def average(xs):\n    return sum(xs)/len(xs)",
+            "review": "处理空列表，添加类型提示与异常处理。",
         },
         {
             "language": "java",
-            "code": "public class Calculator public static int add int a int b return a plus b",
-            "review": "评分7分，代码简洁，建议添加文档注释和溢出处理"
-        },
-        {
-            "language": "python",
-            "code": "def fibonacci(n): return n if n <= 1 else fibonacci(n-1) + fibonacci(n-2)",
-            "review": "评分5分，递归实现简洁但效率低，建议使用动态规划优化"
+            "code": "class C { int add(int a,int b){ return a+b; } }",
+            "review": "添加文档注释、参数校验，考虑溢出与单元测试。",
         },
         {
             "language": "javascript",
-            "code": "function greet(name) console.log hello + name",
-            "review": "评分4分，缺少参数验证和错误处理，建议添加输入检查"
-        }
+            "code": "function greet(n){ console.log('hi '+n) }",
+            "review": "校验参数类型，处理 null/undefined，避免 XSS。",
+        },
+        {
+            "language": "go",
+            "code": "func Sum(a,b int) int { return a+b }",
+            "review": "错误处理、命名规范、测试用例与基准测试。",
+        },
+        {
+            "language": "rust",
+            "code": "fn add(a:i32,b:i32)->i32{a+b}",
+            "review": "使用 Result 处理错误，添加文档与单元测试。",
+        },
     ]
-    
-    # 创建嵌入模型
-    embeddings = OpenAIEmbeddings()
-    
-    # 创建向量存储
+    # 为模板渲染安全地转义示例中的花括号
+    for ex in examples:
+        ex["code_escaped"] = _escape_braces(ex["code"])
+
+    embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
     vectorstore = FAISS.from_texts(
         texts=[f"{ex['language']}: {ex['code']}" for ex in examples],
         embedding=embeddings,
-        metadatas=examples
+        metadatas=examples,
     )
-    
-    # 创建语义相似度示例选择器
-    example_selector = SemanticSimilarityExampleSelector(
-        vectorstore=vectorstore,
-        k=2  # 选择最相似的2个示例
-    )
-    
-    return example_selector, examples
 
-def create_complex_prompt_template():
-    """
-    创建复杂的Prompt模板组合
-    
-    任务：
-    1. 使用ChatPromptTemplate创建对话式prompt
-    2. 添加系统消息、人类消息和示例消息
-    3. 支持部分格式化（partial formatting）
-    4. 实现条件性prompt组件
-    """
-    from langchain_core.prompts import SystemMessagePromptTemplate, HumanMessagePromptTemplate
-    
-    # 系统消息模板
-    system_template = SystemMessagePromptTemplate.from_template(
-        "你是一个经验丰富的{role}，专门从事{specialty}。"
-        "你的评审风格是{style}，评审时请关注{focus_areas}。"
-    )
-    
-    # 人类消息模板
-    human_template = HumanMessagePromptTemplate.from_template(
-        "请评审以下{language}代码：\n```{language}\n{code}\n```\n"
-        "评审要求：{requirements}\n"
-        "输出格式：{output_format}"
-    )
-    
-    # 创建聊天模板
-    chat_template = ChatPromptTemplate.from_messages([
-        system_template,
-        human_template
+    selector = SemanticSimilarityExampleSelector(vectorstore=vectorstore, k=2)
+    return selector
+
+
+# ---------------------------
+# 构建链：语言识别 -> Prompt(含 Few-shot) -> 结构化输出
+# ---------------------------
+def build_chain():
+    if not os.getenv("OPENAI_API_KEY"):
+        raise RuntimeError("未检测到 OPENAI_API_KEY 环境变量")
+
+    # 语言识别
+    lang_prompt = ChatPromptTemplate.from_messages([
+        ("system", "你是编程语言识别器。判断用户给定代码的主要编程语言。"),
+        (
+            "human",
+            "只返回 JSON，字段 language(语言名) 与 confidence(1-100)。\n代码：\n```\n{code}\n```",
+        ),
     ])
-    
-    # 部分格式化：预设一些常用值
-    partial_template = chat_template.partial(
-        role="高级软件工程师",
-        specialty="代码质量和性能优化",
-        style="严谨但建设性",
-        focus_areas="代码可读性、性能、安全性和最佳实践",
-        requirements="提供详细的问题分析和改进建议",
-        output_format="结构化JSON格式"
-    )
-    
-    return partial_template
+    lang_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+    lang_detector = lang_prompt | lang_llm.with_structured_output(LanguageGuess)
 
-def demo_partial_formatting():
-    """
-    演示部分格式化功能
-    
-    部分格式化允许你预先填入一些变量，在运行时再填入其他变量
-    """
-    print("=== 部分格式化演示 ===")
-    
-    # 创建一个需要多个变量的模板
-    template = PromptTemplate.from_template(
-        "作为{role}，请在{context}的背景下，对以下{language}代码进行评审：\n{code}"
+    # Few-shot（动态示例选择）
+    # 注意：使用已转义的 code_escaped，避免花括号触发模板占位符错误
+    example_prompt = PromptTemplate.from_template(
+        "编程语言: {language}\n代码: {code_escaped}\n评审: {review}"
     )
-    
-    # 部分格式化：预先设置role和context
-    partial_template = template.partial(
-        role="高级软件工程师",
-        context="生产环境部署前的最终检查"
+    selector = build_example_selector()
+    few_shot = FewShotPromptTemplate(
+        example_selector=selector,
+        example_prompt=example_prompt,
+        input_variables=["language", "code"],
+        prefix="以下为历史评审示例：",
+        suffix="——示例结束——",
     )
-    
-    print(f"原始模板变量: {template.input_variables}")
-    print(f"部分格式化后的变量: {partial_template.input_variables}")
-    
-    # 现在只需要提供language和code
-    final_prompt = partial_template.format(
-        language="Python",
-        code="def hello(): print('world')"
-    )
-    print(f"\n最终Prompt:\n{final_prompt}")
 
-def demo_semantic_selector():
-    """演示语义相似度示例选择器"""
-    print("\n=== 语义相似度示例选择器演示 ===")
-    
-    try:
-        # 创建语义选择器
-        example_selector, examples = create_semantic_example_selector()
-        
-        # 测试查询
-        test_query = "python function with loop"
-        selected_examples = example_selector.select_examples({"query": test_query})
-        
-        print(f"查询: {test_query}")
-        print(f"选中的示例数量: {len(selected_examples)}")
-        for i, example in enumerate(selected_examples):
-            print(f"示例 {i+1}: {example['language']} - {example['code'][:50]}...")
-            
-    except Exception as e:
-        print(f"语义选择器演示失败: {e}")
-        print("这可能需要有效的OpenAI API密钥")
+    # 主评审 Prompt（支持规则与模式）
+    main_prompt = ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                "你是资深代码评审专家。语言: {language}。审查重点: {rules}。输出模式: {mode}。\n"
+                "请输出严格的 JSON，字段包括 overall_rating(1-10)、issues、suggestions、strengths、summary。",
+            ),
+            ("system", "以下为若干参考评审示例：\n{few_shot}"),
+            # 使用 code_for_prompt（已转义花括号）
+            ("human", "请评审以下代码：\n```{language}\n{code_for_prompt}\n```"),
+        ]
+    )
 
-def demo_complex_template():
-    """演示复杂模板"""
-    print("\n=== 复杂聊天模板演示 ===")
-    
-    try:
-        # 创建复杂模板
-        template = create_complex_prompt_template()
-        
-        # 格式化模板
-        formatted = template.format(
-            language="python",
-            code="def hello(): print('world')"
-        )
-        
-        print("生成的聊天消息:")
-        print(f"类型: {type(formatted)}")
-        print(f"内容: {formatted}")
-            
-    except Exception as e:
-        print(f"复杂模板演示失败: {e}")
+    review_llm = ChatOpenAI(model="gpt-4o", temperature=0.1)
 
-def demo_prompt_composition():
-    """
-    演示Prompt组合功能
-    """
-    print("\n=== Prompt组合演示 ===")
-    
-    # 创建可重用的Prompt组件
-    system_template = PromptTemplate.from_template(
-        "你是一个{expertise}专家，专门从事{focus_area}。"
+    # 组合链（LCEL）
+    # 1) 提取 code 并识别语言
+    step_detect = RunnableMap(
+        {
+            "code": itemgetter("code"),
+            "language": RunnableLambda(lambda x: x["code"])  # str code
+            | lang_detector  # -> LanguageGuess
+            | RunnableLambda(_get_language_from_guess),
+        }
     )
-    
-    context_template = PromptTemplate.from_template(
-        "当前任务上下文：{context}\n评审标准：{standards}"
+
+    # 2) 基于上一步的输出，计算规则与模式
+    step_rules = RunnableLambda(_step_rules)
+
+    # 3) 生成 few-shot 文本并拼装最终 prompt 变量
+    step_fewshot = RunnableMap(
+        {
+            "code": itemgetter("code"),
+            "language": itemgetter("language"),
+            "rules": itemgetter("rules"),
+            "mode": itemgetter("mode"),
+            # FewShotPromptTemplate -> PromptValue，需要转换为纯字符串
+            "few_shot": few_shot | RunnableLambda(_promptvalue_to_str),
+            # 为最终主提示提供已转义的代码文本，防止花括号干扰
+            "code_for_prompt": itemgetter("code") | RunnableLambda(_escape_braces),
+        }
     )
-    
-    task_template = PromptTemplate.from_template(
-        "请评审以下{language}代码：\n{code}"
+
+    chain = step_detect | step_rules | step_fewshot | main_prompt | review_llm.with_structured_output(
+        CodeReviewResult
     )
-    
-    # 手动组合模板字符串，避免嵌套花括号
-    combined_template_str = (
-        "你是一个{expertise}专家，专门从事{focus_area}。\n\n"
-        "当前任务上下文：{context}\n评审标准：{standards}\n\n"
-        "请评审以下{language}代码：\n{code}"
+
+    return chain
+
+
+# ---------------------------
+# CLI
+# ---------------------------
+def parse_args():
+    parser = argparse.ArgumentParser(description="智能代码评审助手（LangChain 0.3）")
+    parser.add_argument(
+        "-f", "--file", required=True, help="需要评审的代码文件路径"
     )
-    
-    combined_template = PromptTemplate.from_template(combined_template_str)
-    
-    print(f"组合后的模板:\n{combined_template.template}")
-    print(f"需要的变量: {combined_template.input_variables}")
-    """
-    演示Prompt组合功能
-    """
-    print("\n=== Prompt组合演示 ===")
-    
-    # 创建可重用的Prompt组件
-    system_template = PromptTemplate.from_template(
-        "你是一个{expertise}专家，专门从事{focus_area}。"
-    )
-    
-    context_template = PromptTemplate.from_template(
-        "当前任务上下文：{context}\n评审标准：{standards}"
-    )
-    
-    task_template = PromptTemplate.from_template(
-        "请评审以下{language}代码：\n{code}"
-    )
-    
-    # 手动组合模板字符串，避免嵌套花括号
-    combined_template_str = (
-        "你是一个{expertise}专家，专门从事{focus_area}。\n\n"
-        "当前任务上下文：{context}\n评审标准：{standards}\n\n"
-        "请评审以下{language}代码：\n{code}"
-    )
-    
-    combined_template = PromptTemplate.from_template(combined_template_str)
-    
-    print(f"组合后的模板:\n{combined_template.template}")
-    print(f"需要的变量: {combined_template.input_variables}")
+    return parser.parse_args()
+
 
 def main():
-    """主函数"""
+    args = parse_args()
+    code = load_code(args.file)
+
     try:
-        print("🔍 LangChain Challenge 3: 高级Prompt Template和Few-shot Learning")
-        print("=" * 60)
-        
-        # 演示部分格式化
-        demo_partial_formatting()
-        
-        # 演示Prompt组合
-        demo_prompt_composition()
-        
-        # 演示语义选择器
-        demo_semantic_selector()
-        
-        # 演示复杂模板
-        demo_complex_template()
-        
-        print("\n" + "=" * 60)
-        print("开始代码评审演示...")
-        
-        # 创建评审助手
-        llm, prompt = create_code_review_assistant()
-        
-        # 测试代码
-        test_code = """
-def process_data(data):
-    result = []
-    for i in range(len(data)):
-        if data[i] > 0:
-            result.append(data[i] * 2)
-    return result
-        """
-        
-        # 生成评审
-        try:
-            formatted_prompt = prompt.format(
-                language="python",
-                code=test_code
-            )
-            
-            print(f"\n生成的Prompt:\n{formatted_prompt}")
-            print(f"\nPrompt长度: {len(formatted_prompt)} 字符")
-            
-        except Exception as format_error:
-            print(f"格式化Prompt时发生错误: {format_error}")
-            # 简化错误处理，避免引用未定义的变量
-            print("可能是示例数据格式问题，请检查代码中的示例定义")
-            return
-        
-        # 获取评审结果
-        print("\n正在分析代码...")
-        review_result = llm.invoke(formatted_prompt)
-        
-        print(f"\n📊 代码评审结果:")
-        if isinstance(review_result, CodeReviewResult):
-            print(f"整体评分: {review_result.overall_rating}/10")
-            print(f"发现的问题: {', '.join(review_result.issues)}")
-            print(f"改进建议: {', '.join(review_result.suggestions)}")
-            print(f"代码优点: {', '.join(review_result.strengths)}")
-            print(f"总结: {review_result.summary}")
-        else:
-            # 如果返回的是字典或其他格式
-            print(f"评审结果: {review_result}")
-        
-        print("\n" + "=" * 60)
-        print("🎯 练习任务:")
-        print("1. 实现create_semantic_example_selector()函数")
-        print("2. 实现create_complex_prompt_template()函数")
-        print("3. 添加代码复杂度检测，根据复杂度选择不同的评审模板")
-        print("4. 实现支持多种输出格式的动态模板")
-        print("5. 添加更多编程语言的评审示例")
-        
+        chain = build_chain()
     except Exception as e:
-        print(f"❌ 错误: {e}")
-        print("\n请确保:")
-        print("1. 已设置 OPENAI_API_KEY 环境变量")
-        print("2. 已安装所需的依赖包: pip install langchain langchain-openai faiss-cpu")
+        print(f"❌ 初始化失败: {e}")
+        print("请确认已安装依赖并设置 OPENAI_API_KEY。")
+        return
+
+    print("🔎 正在分析并识别语言…")
+    # 先单独跑一次语言识别，给用户一个可见回显
+    lang_prompt = ChatPromptTemplate.from_messages([
+        ("system", "你是编程语言识别器。判断用户给定代码的主要编程语言。"),
+        (
+            "human",
+            "只返回 JSON，字段 language 与 confidence。\n代码：\n```\n{code}\n```",
+        ),
+    ])
+    lang_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+    lang_detector = lang_prompt | lang_llm.with_structured_output(LanguageGuess)
+    try:
+        guess_raw = lang_detector.invoke({"code": code})
+        # 兼容 dict 或模型
+        if isinstance(guess_raw, dict):
+            lang = guess_raw.get("language", "未知")
+            conf = guess_raw.get("confidence", "?")
+        else:
+            lang = getattr(guess_raw, "language", "未知")
+            conf = getattr(guess_raw, "confidence", "?")
+        print(f"语言识别: {lang}（置信度 {conf}）")
+    except Exception:
+        print("语言识别阶段发生问题，将在评审链内重试。")
+
+    print("🧪 正在进行代码评审…")
+    try:
+        result_any = chain.invoke({"code": code})
+        # 统一为模型实例
+        if isinstance(result_any, dict):
+            # Pydantic v2: model_validate；若为 v1，可回退到构造函数
+            try:
+                result: CodeReviewResult = CodeReviewResult.model_validate(result_any)  # type: ignore[attr-defined]
+            except Exception:
+                result = CodeReviewResult(**result_any)
+        else:
+            result = result_any  # type: ignore[assignment]
+    except Exception as e:
+        print(f"❌ 评审失败: {e}")
+        return
+
+    print("\n📊 代码评审结果")
+    print(f"整体评分: {result.overall_rating}/10")
+    print(f"发现的问题: {', '.join(result.issues) if result.issues else '无'}")
+    print(f"改进建议: {', '.join(result.suggestions) if result.suggestions else '无'}")
+    print(f"代码优点: {', '.join(result.strengths) if result.strengths else '无'}")
+    print(f"总结: {result.summary}")
+
 
 if __name__ == "__main__":
     main()
