@@ -5,6 +5,7 @@ langgraph
 langsmith
 langserve
 langchain-openai
+langchain-deepseek
 langchain-tavily
 langchain-text-splitters
 langchain-experimental
