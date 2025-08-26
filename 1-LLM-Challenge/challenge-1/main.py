@@ -22,8 +22,6 @@ from pydantic import BaseModel, Field
 from langchain.chat_models import init_chat_model
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
-
-
 class TranslationResult(BaseModel):
     """翻译结果结构（用于可选的结构化输出模式）。"""
 
@@ -212,7 +210,6 @@ def main(argv: list[str]) -> int:
         run_stream_mode(args.model, args.src_language, args.dst_language, args.text_message)
 
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))

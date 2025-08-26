@@ -1,8 +1,8 @@
-r"""
+"""
 Challenge 6: 使用 LangChain（v0.3）调用 DALL·E 3 生图并保存到本地
 
 用法（PowerShell）：
-  python .\main.py --prompt "一只在太空中弹吉他的猫女孩" --n 1 --size 1024x1024
+  python main.py --prompt "一只在太空中弹吉他的猫女孩" --n 1 --size 1024x1024
 
 环境变量：
 - OPENAI_API_KEY（必需）
